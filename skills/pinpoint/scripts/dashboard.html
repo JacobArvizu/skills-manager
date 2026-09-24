@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinpoint · __PP_SESSION__</title>
+<style>
+  :root { --bg: #f7f7f9; --card: #fff; --ink: #18181b; --muted: #71717a; --line: #e4e4e7; --accent: #6d5dfc;
+    --draft: #6d5dfc; --sent: #e8900c; --resolved: #16a34a; --wontfix: #71717a; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0f0f13; --card: #18181f; --ink: #ececf1; --muted: #9a9aa6; --line: #2a2a33; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14.5px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { max-width: 1040px; margin: 0 auto; padding: 32px 20px 8px; display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-end; justify-content: space-between; }
+  h1 { margin: 0; font-size: 22px; letter-spacing: -.02em; }
+  .sub { color: var(--muted); margin-top: 4px; font-size: 13.5px; word-break: break-all; }
+  .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 9px;
+    padding: 8px 13px; font: 600 13px/1.2 system-ui, sans-serif; cursor: pointer; text-decoration: none; }
+  .btn:hover { border-color: var(--muted); }
+  .btn.primary { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+  main { max-width: 1040px; margin: 0 auto; padding: 12px 20px 60px; }
+  .tabs { display: flex; gap: 4px; margin: 12px 0 16px; flex-wrap: wrap; }
+  .tab { border: 0; background: none; color: var(--muted); padding: 6px 11px; border-radius: 8px; font: 600 13px/1.2 system-ui; cursor: pointer; }
+  .tab.on { background: var(--ink); color: var(--bg); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; display: flex; flex-direction: column; }
+  .shot { background: repeating-conic-gradient(var(--line) 0 25%, transparent 0 50%) 0 0 / 14px 14px; max-height: 220px; overflow: hidden; display: flex; align-items: center; justify-content: center; border-bottom: 1px solid var(--line); }
+  .shot img { max-width: 100%; max-height: 220px; display: block; }
+  .body { padding: 12px 14px 14px; display: flex; flex-direction: column; gap: 6px; }
+  .top { display: flex; gap: 8px; align-items: center; font: 600 11px/1 system-ui; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+  .num { color: #fff; font: 700 11px/20px system-ui; min-width: 22px; height: 20px; border-radius: 10px 10px 10px 3px; text-align: center; padding: 0 5px; }
+  .comment { white-space: pre-wrap; font-size: 14.5px; }
+  .quote { border-left: 3px solid var(--accent); padding: 2px 8px; color: var(--muted); font-size: 13px; }
+  .meta { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); word-break: break-all; }
+  .reply { background: rgba(22,163,74,.1); border-radius: 8px; padding: 6px 9px; font-size: 13px; white-space: pre-wrap; }
+  .reply b { font-size: 10.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); display: block; }
+  .empty { text-align: center; padding: 60px 20px; color: var(--muted); border: 1px dashed var(--line); border-radius: 14px; }
+  details { margin-top: 28px; background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; }
+  summary { cursor: pointer; font-weight: 650; }
+  code, pre { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+  .bm { display: inline-block; padding: 7px 12px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 650; text-decoration: none; cursor: grab; }
+  .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 9px 14px; border-radius: 10px; font-weight: 550; display: none; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Pinpoint</h1>
+    <div class="sub" id="sub"></div>
+  </div>
+  <div class="actions">
+    <a class="btn primary" id="open" target="_blank" rel="noopener">Open page to annotate</a>
+    <button class="btn" id="copy">Copy Markdown</button>
+    <a class="btn" id="json" download>Download JSON</a>
+  </div>
+</header>
+<main>
+  <div class="tabs" id="tabs"></div>
+  <div id="list"></div>
+  <details id="howto">
+    <summary>Add Pinpoint to any page (no proxy)</summary>
+    <p>Drag this to your bookmarks bar, then click it on any page while Pinpoint is running:</p>
+    <p><a class="bm" id="bm">📍 Pinpoint</a></p>
+    <p>Or paste this into a page's HTML during development:</p>
+    <pre id="snippet"></pre>
+    <p style="color:var(--muted);font-size:13px">Sites with a strict Content-Security-Policy block both. Use <code>pinpoint open &lt;url&gt;</code> for those; it proxies the page and injects the overlay for you.</p>
+    <p><b>In the page:</b> Alt+P pick elements · Alt+D draw · select text → Comment · Alt+L list · Alt+Enter send · Alt+H hide pins</p>
+  </details>
+</main>
+<div class="toast" id="toast"></div>
+<script>
+  const CFG = __PP_CONFIG__;
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const COLORS = { draft: 'var(--draft)', sent: 'var(--sent)', resolved: 'var(--resolved)', wontfix: 'var(--wontfix)' };
+  let annotations = [];
+  let filter = 'open';
+  let listening = 0;
+
+  $('sub').textContent = `Session "${CFG.session}" · ${CFG.target ? CFG.target : 'inject mode (bookmarklet / snippet)'}`;
+  if (CFG.openUrl) $('open').href = CFG.openUrl; else $('open').style.display = 'none';
+  if (!CFG.openUrl) $('howto').open = true;
+  $('json').href = `${CFG.base}/api/export?format=json&token=${CFG.token}`;
+  $('bm').href = CFG.bookmarklet;
+  $('snippet').textContent = CFG.snippet;
+  $('copy').onclick = async () => {
+    const md = await (await fetch(`${CFG.base}/api/export?format=md&token=${CFG.token}`)).text();
+    try { await navigator.clipboard.writeText(md); toast('Copied as Markdown'); } catch { toast('Clipboard blocked'); }
+  };
+  function toast(t) { const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2200); }
+
+  const FILTERS = { open: (a) => a.status === 'draft' || a.status === 'sent', done: (a) => a.status === 'resolved' || a.status === 'wontfix', all: () => true };
+  function render() {
+    $('tabs').innerHTML = Object.keys(FILTERS).map((k) => `<button class="tab ${filter === k ? 'on' : ''}" data-f="${k}">${k[0].toUpperCase() + k.slice(1)} ${annotations.filter(FILTERS[k]).length}</button>`).join('')
+      + `<span style="margin-left:auto;align-self:center;color:var(--muted);font-size:13px">${listening ? '● Agent listening' : 'No agent listening'}</span>`;
+    const list = annotations.filter(FILTERS[filter]).sort((a, b) => b.n - a.n);
+    if (!list.length) { $('list').innerHTML = `<div class="empty">No annotations here yet. Open the page, press <b>Alt+P</b> and click something.</div>`; return; }
+    $('list').innerHTML = `<div class="grid">${list.map((a) => {
+      const t = a.targets[0];
+      const src = t && t.source && t.source.file ? `${t.source.file}${t.source.line ? ':' + t.source.line : ''}` : '';
+      return `<article class="card">
+        ${a.screenshot ? `<div class="shot"><img loading="lazy" alt="" src="${CFG.base}/${a.screenshot}?token=${CFG.token}&v=${encodeURIComponent(a.updatedAt)}"></div>` : ''}
+        <div class="body">
+          <div class="top"><span class="num" style="background:${COLORS[a.status]}">${a.id}</span>${esc(a.kind)} · ${esc(a.status)}</div>
+          ${a.comment ? `<div class="comment">${esc(a.comment)}</div>` : ''}
+          ${a.quote ? `<div class="quote">“${esc(a.quote)}”</div>` : ''}
+          <div class="meta">${esc(a.page ? a.page.url : '')}</div>
+          ${t ? `<div class="meta">${esc(t.selector)}</div>` : ''}
+          ${src ? `<div class="meta">${esc(src)}</div>` : ''}
+          ${a.replies.map((r) => `<div class="reply"><b>${r.from}</b>${esc(r.text)}</div>`).join('')}
+        </div></article>`;
+    }).join('')}</div>`;
+  }
+  $('tabs').onclick = (e) => { const b = e.target.closest('[data-f]'); if (b) { filter = b.dataset.f; render(); } };
+
+  const es = new EventSource(`${CFG.base}/api/stream?token=${CFG.token}`);
+  es.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'snapshot') { annotations = m.annotations; listening = m.listening; }
+    else if (m.type === 'upsert') { const i = annotations.findIndex((a) => a.id === m.annotation.id); if (i >= 0) annotations[i] = m.annotation; else annotations.push(m.annotation); }
+    else if (m.type === 'delete') annotations = annotations.filter((a) => a.id !== m.id);
+    else if (m.type === 'listening') listening = m.count;
+    render();
+  };
+  render();
+</script>
+</body>
+</html>

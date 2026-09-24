@@ -1,0 +1,38 @@
+#!/bin/sh
+# Pinpoint launcher. Finds a Node.js 18+ runtime and runs pinpoint.mjs next to
+# this script. Works when called by path, from PATH, or through a symlink
+# (`pinpoint link`). Override the runtime with PINPOINT_NODE=/path/to/node.
+set -eu
+
+src=$0
+while [ -h "$src" ]; do
+  d=$(cd -P "$(dirname -- "$src")" && pwd)
+  src=$(readlink "$src")
+  case $src in /*) ;; *) src=$d/$src ;; esac
+done
+dir=$(cd -P "$(dirname -- "$src")" && pwd)
+
+find_node() {
+  if [ -n "${PINPOINT_NODE:-}" ]; then echo "$PINPOINT_NODE"; return 0; fi
+  for c in node nodejs; do
+    if command -v "$c" >/dev/null 2>&1; then command -v "$c"; return 0; fi
+  done
+  for c in /opt/homebrew/bin/node /usr/local/bin/node /usr/bin/node \
+           "$HOME/.volta/bin/node" "$HOME/.local/share/fnm/aliases/default/bin/node" \
+           "$HOME/.asdf/shims/node" "$HOME/.local/share/mise/shims/node"; do
+    if [ -x "$c" ]; then echo "$c"; return 0; fi
+  done
+  if [ -d "$HOME/.nvm/versions/node" ]; then
+    c=$(ls -1d "$HOME"/.nvm/versions/node/v*/bin/node 2>/dev/null \
+      | sed 's|.*/v\([0-9]*\)\.[^/]*/bin/node$|\1 &|' | sort -n | tail -n 1 | cut -d' ' -f2-)
+    if [ -n "$c" ] && [ -x "$c" ]; then echo "$c"; return 0; fi
+  fi
+  if command -v bun >/dev/null 2>&1; then command -v bun; return 0; fi
+  return 1
+}
+
+if ! node=$(find_node); then
+  echo '{"ok":false,"error":"node_not_found","message":"Pinpoint needs Node.js 18+ (https://nodejs.org). Or set PINPOINT_NODE=/path/to/node."}'
+  exit 127
+fi
+exec "$node" "$dir/pinpoint.mjs" "$@"
