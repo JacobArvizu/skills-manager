@@ -159,10 +159,58 @@ async function linuxScreenshot(file, sess) {
   throw new Error(`No screenshot tool worked. Install ${hint}.${errors.length ? ` (${errors.join('; ')})` : ''} Run \`pinpoint doctor\` for exact commands.`);
 }
 
+/** The AT-SPI bus switch that Qt (and Chromium) apps watch before exposing their UI. */
+export async function a11yStatus() {
+  if (!(await has('gdbus'))) return null;
+  const r = await run('gdbus', ['call', '--session', '--dest', 'org.a11y.Bus', '--object-path', '/org/a11y/bus',
+    '--method', 'org.freedesktop.DBus.Properties.Get', 'org.a11y.Status', 'IsEnabled'], { timeout: 5000 });
+  return r.ok ? /true/.test(r.stdout) : null;
+}
+export async function setA11y(on) {
+  const r = await run('gdbus', ['call', '--session', '--dest', 'org.a11y.Bus', '--object-path', '/org/a11y/bus',
+    '--method', 'org.freedesktop.DBus.Properties.Set', 'org.a11y.Status', 'IsEnabled', `<${on ? 'true' : 'false'}>`], { timeout: 5000 });
+  let gnome = false;
+  if (await has('gsettings')) gnome = (await run('gsettings', ['set', 'org.gnome.desktop.interface', 'toolkit-accessibility', on ? 'true' : 'false'], { timeout: 5000 })).ok;
+  return { ok: r.ok, error: r.ok ? undefined : (r.stderr || '').trim().slice(0, 200), gnome };
+}
+
+/** KDE Plasma: window + screen geometry from a short-lived KWin script (see linux-kwin.py). */
+async function kwinQuery() {
+  const py = await findGiPython('Gio');
+  if (!py) return { error: 'python3-gi missing' };
+  const r = await run(py, ['-W', 'ignore', path.join(HERE, 'linux-kwin.py')], { timeout: 12000 });
+  return parseJSON(r.stdout.trim().split('\n').pop(), { error: (r.stderr || 'no output').trim().slice(0, 160) });
+}
+
+async function kscreenMonitors() {
+  const bin = (await has('kscreen-doctor')) ? 'kscreen-doctor' : null;
+  if (!bin) return [];
+  const j = parseJSON((await run(bin, ['-j'], { timeout: 8000 })).stdout, null);
+  return (j?.outputs || []).filter((o) => o.enabled && o.pos).map((o) => {
+    const mode = (o.modes || []).find((m) => String(m.id) === String(o.currentModeId));
+    const k = o.scale || 1, rot = o.rotation === 2 || o.rotation === 8;
+    const w = (mode?.size?.width || o.size?.width || 0) / k, h = (mode?.size?.height || o.size?.height || 0) / k;
+    return { x: o.pos.x, y: o.pos.y, width: rot ? h : w, height: rot ? w : h };
+  });
+}
+
 const procName = (pid) => { try { return fs.readFileSync(`/proc/${pid}/comm`, 'utf8').trim(); } catch { return ''; } };
 
 /** Windows front → back, in screen coordinates, from whatever this session exposes. */
-async function linuxWindows(sess, warnings) {
+async function linuxWindows(sess, warnings, kw) {
+  // KDE Plasma (Wayland and X11): KWin scripting
+  if (sess.compositor === 'kde' && kw) {
+    if (Array.isArray(kw.windows)) {
+      return kw.windows.filter((w) => w.frame && w.frame.width > 0).map((w) => ({
+        app: w.app || procName(w.pid), pid: w.pid, title: w.title, client: w.client,
+        x: w.frame.x, y: w.frame.y, width: w.frame.width, height: w.frame.height,
+      }));
+    }
+    if (sess.wayland) {
+      warnings.push(`KWin didn't report window positions (${kw.error || 'unknown error'}). Dragged regions and drawing still work; run \`pinpoint doctor\`.`);
+      return [];
+    }
+  }
   // Hyprland
   if (sess.compositor === 'hyprland' && (await has('hyprctl'))) {
     const mons = parseJSON((await run('hyprctl', ['monitors', '-j'])).stdout, []);
@@ -267,7 +315,12 @@ async function captureLinux(dir, opts) {
   // Logical monitor layout: the screenshot covers its bounding box, in physical pixels
   // on scaled (HiDPI) outputs, while window/element coordinates are logical.
   let mons = [];
-  if (sess.compositor === 'hyprland' && (await has('hyprctl'))) {
+  const kw = sess.compositor === 'kde' ? await kwinQuery() : null;
+  if (kw?.screens?.length) {
+    mons = kw.screens;
+  } else if (sess.compositor === 'kde' && (mons = await kscreenMonitors()).length) {
+    // from kscreen-doctor
+  } else if (sess.compositor === 'hyprland' && (await has('hyprctl'))) {
     mons = parseJSON((await run('hyprctl', ['monitors', '-j'])).stdout, []).map((m) => {
       const k = m.scale || 1, rot = m.transform % 2 === 1;
       return { x: m.x, y: m.y, width: (rot ? m.height : m.width) / k, height: (rot ? m.width : m.height) / k };
@@ -285,7 +338,7 @@ async function captureLinux(dir, opts) {
     // Only trust the layout when its aspect matches the image (guards against partial info).
     if (bw > 0 && bh > 0 && Math.abs(px.width / bw - px.height / bh) < 0.05) { lw = bw; lh = bh; }
   }
-  const windows = await linuxWindows(sess, warnings);
+  const windows = await linuxWindows(sess, warnings, kw);
   const displays = [{ id: 1, x: ox, y: oy, width: lw, height: lh, file: 'display-1.png', scale: px.width && lw ? px.width / lw : 1, capturedWith: shotBy }];
 
   let tree = [];
@@ -341,7 +394,7 @@ export function merge(raw) {
       if (used.has(r)) continue;
       const t = tree[r];
       if (w.pid && t.pid && w.pid !== t.pid) continue;
-      const s = iou(w, t);
+      const s = Math.max(iou(w, t), w.client ? iou(w.client, t) : 0);
       if (s > bestScore) { bestScore = s; best = r; }
     }
     let shift = null;
@@ -351,12 +404,23 @@ export function merge(raw) {
         if (used.has(r)) continue;
         const t = tree[r];
         if (!w.pid || t.pid !== w.pid) continue;
-        if (Math.abs(t.width - w.width) <= 80 && Math.abs(t.height - w.height) <= 80) {
+        const c = w.client && w.client.width > 0 ? w.client : null;
+        const ref = c || w;
+        if (Math.abs(t.width - ref.width) <= 80 && Math.abs(t.height - ref.height) <= 80) {
           best = r;
-          if (raw.relative || (Math.abs(t.x) < 4 && Math.abs(t.y) < 4)) shift = { dx: w.x + Math.max(0, (w.width - t.width) / 2) - t.x, dy: w.y + Math.max(0, w.height - t.height) - t.y };
+          if (raw.relative || (Math.abs(t.x) < 4 && Math.abs(t.y) < 4)) {
+            // Known content area (KWin): align exactly. Otherwise assume side borders + a top title bar.
+            shift = c ? { dx: c.x - t.x, dy: c.y - t.y }
+              : { dx: w.x + Math.max(0, (w.width - t.width) / 2) - t.x, dy: w.y + Math.max(0, w.height - t.height) - t.y };
+          }
           break;
         }
       }
+    }
+    if (best >= 0 && !shift && raw.relative && w.client) {
+      // Window-relative tree that happened to overlap its window near the origin.
+      const t = tree[best];
+      if (Math.abs(t.x) < 4 && Math.abs(t.y) < 4 && Math.abs(t.x - w.client.x) + Math.abs(t.y - w.client.y) > 1) shift = { dx: w.client.x - t.x, dy: w.client.y - t.y };
     }
     if (best >= 0) used.add(best);
     order.push({ w, root: best >= 0 ? best : null, shift });
@@ -511,7 +575,10 @@ export async function diagnose() {
     add('Screenshot tool', found.length, found.length ? found[0] : 'missing (ImageMagick import, scrot or maim)', found.length ? null : 'import');
   }
   // Windows
-  if (sess.compositor === 'hyprland') add('Window positions', await has('hyprctl'), 'hyprctl');
+  if (sess.compositor === 'kde') {
+    const kw = await kwinQuery();
+    add('Window positions (KWin script)', Array.isArray(kw.windows), Array.isArray(kw.windows) ? `${kw.windows.length} window(s) on this desktop` : kw.error, Array.isArray(kw.windows) ? null : 'gi');
+  } else if (sess.compositor === 'hyprland') add('Window positions', await has('hyprctl'), 'hyprctl');
   else if (sess.compositor === 'sway') add('Window positions', await has('swaymsg'), 'swaymsg');
   else if (sess.wayland && sess.compositor === 'gnome') {
     const r = await run('gdbus', ['introspect', '--session', '--dest', 'org.gnome.Shell', '--object-path', '/org/gnome/Shell/Extensions/Windows'], { timeout: 5000 });
@@ -535,9 +602,11 @@ export async function diagnose() {
   }
   const missing = checks.filter((c) => !c.ok && c.pkg).map((c) => c.pkg);
   const install = pm && missing.length ? `${PM[pm][1]} ${[...new Set(missing.map((k) => PKGS[k][PM[pm][0]]))].join(' ')}` : null;
+  const a11y = await a11yStatus();
+  if (a11y !== null) add('Accessibility bus enabled', a11y, a11y ? 'on' : 'off: Qt/KDE and Chromium apps hide their controls. Fix: `pinpoint a11y on` (then restart those apps)');
   const notes = [
     'GNOME: `gsettings set org.gnome.desktop.interface toolkit-accessibility true`, then restart apps, to expose UI elements.',
-    'Qt/KDE apps: set QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1. Chrome/Electron/VS Code: launch with --force-renderer-accessibility.',
+    'Qt/KDE apps expose controls once `pinpoint a11y on` is set (restart apps started before). Chrome/Electron/VS Code may also need --force-renderer-accessibility.',
   ];
   return { platform: 'linux', session: sess, packageManager: pm, checks, install, notes };
 }

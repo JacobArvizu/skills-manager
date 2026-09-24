@@ -115,8 +115,8 @@ Before the first screen capture on a machine, run `"$P" doctor`. It checks every
 
 Platform notes:
 - **Linux, X11:** full support. Windows come from `wmctrl`/`xprop`/`xwininfo`, UI elements from AT-SPI (`python3-gi` + AT-SPI typelib; Pinpoint finds a system Python that has them even when pyenv/conda shadows `python3`).
-- **Linux, Wayland:** screenshots via `grim` (Sway/Hyprland), `gnome-screenshot`, `spectacle`, or the xdg-desktop-portal (may ask permission once). Window and element picking needs window positions. **Sway** and **Hyprland** provide them. **GNOME** needs the "Window Calls" extension (or a "GNOME on Xorg" login). **KDE** and other Wayland desktops only get regions and drawing. HiDPI scaling is handled.
-- **Linux, UI elements missing** from some apps: GNOME needs `gsettings set org.gnome.desktop.interface toolkit-accessibility true` (then restart the apps). Qt/KDE apps need `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`. Chrome/Electron/VS Code need `--force-renderer-accessibility`.
+- **Linux, Wayland:** screenshots via `spectacle` (KDE), `gnome-screenshot`, `grim` (Sway/Hyprland) or the xdg-desktop-portal (may ask permission once). Window positions come from **KDE Plasma 5/6** (a short-lived KWin script over D-Bus: loaded, read, unloaded), **Sway**, **Hyprland**, or **GNOME** with the "Window Calls" extension (or a "GNOME on Xorg" login). Other Wayland desktops only get regions and drawing. Window-relative element coordinates and HiDPI scaling are handled.
+- **Linux, UI elements missing** from some apps: run `"$P" a11y on` (switches on the desktop's accessibility bus; Qt/KDE and Chromium apps watch it), then restart apps that were already open. GTK apps expose controls by default. Electron/VS Code may also need `--force-renderer-accessibility`.
 - **macOS:** the terminal needs *Screen Recording* (pixels and window titles) and *Accessibility* (UI elements) in System Settings → Privacy & Security.
 - **Windows:** nothing extra (PowerShell + UI Automation).
 
@@ -129,7 +129,8 @@ Platform notes:
 | `show <id>` | One annotation with full detail (all attributes and styles). |
 | `status` · `sessions` · `stop [--all]` · `dashboard` | Inspect/stop servers; open the dashboard. |
 | `doctor` | Check screen-mode dependencies and print the install command. |
-| `desktop [--shortcut "<Super><Shift>p"] [--remove]` | Linux: add "Pinpoint: annotate screen" to the app menu and a global shortcut (auto on GNOME/Cinnamon; prints the line for KDE, Sway, Hyprland, XFCE). |
+| `a11y on\|off` | Linux: toggle the accessibility bus so Qt/KDE/Chromium apps expose their controls. |
+| `desktop [--shortcut "<Super><Shift>p"] [--remove]` | Linux: add "Pinpoint: annotate screen" to the app menu and a global shortcut (auto on GNOME/Cinnamon and KDE Plasma; prints the line for Sway, Hyprland, XFCE). |
 | `clear [--resolved]` | Remove annotations. |
 | `open <other-target>` | Re-point a running session at a new URL or file. |
 | `screen [--delay N] [--image f] [--snapshot tree.json] [--no-elements] [--budget secs]` | Capture the display or annotate an image (see Screen mode). |
@@ -169,6 +170,7 @@ Annotate in the browser, then use **⋯ → Copy all as Markdown** (or the dashb
 - **Selector no longer matches after edits:** expected once the DOM changes. Pins re-find elements by selector and XPath, and unmatched items still appear in the list.
 - **Screen capture is black or shows only the wallpaper (macOS):** grant Screen Recording to the terminal app, then restart it.
 - **Only windows, no UI elements:** run `pinpoint doctor` and follow its output; `--budget 20` allows deeper walks of huge apps.
-- **Wayland: no windows or elements, only regions:** expected on KDE and on GNOME without the "Window Calls" extension (see platform notes).
+- **Wayland: no windows or elements, only regions:** on KDE, `pinpoint doctor` shows why KWin didn't answer (python3-gi missing, or scripting disabled). On GNOME it needs the "Window Calls" extension. Other compositors don't expose windows (see platform notes).
+- **KDE: windows are picked but not their buttons:** `pinpoint a11y on`, then restart the app.
 - **`node_not_found`:** install Node 18+ or set `PINPOINT_NODE=/path/to/node`.
 - **`Permission denied` running the launcher** (some installers drop the executable bit): use `sh <dir>/scripts/pinpoint …` or `node <dir>/scripts/pinpoint.mjs …`. They're equivalent.

@@ -20,9 +20,9 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { capture as captureScreen, diagnose } from './screen/capture.mjs';
+import { capture as captureScreen, diagnose, a11yStatus, setA11y } from './screen/capture.mjs';
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.PINPOINT_HOME || path.join(os.homedir(), '.pinpoint');
 const BASE = '/__pinpoint';
@@ -1205,6 +1205,18 @@ async function cmdDoctor(pos, flags) {
   process.stdout.write(lines.join('\n') + '\n');
 }
 
+async function cmdA11y(pos) {
+  const want = pos[0];
+  if (process.platform !== 'linux') fail('unsupported', 'Only needed on Linux. macOS/Windows: grant accessibility access in system settings instead.');
+  if (want === 'on' || want === 'off') {
+    const r = await setA11y(want === 'on');
+    if (!r.ok) fail('a11y_failed', `Could not reach the accessibility bus: ${r.error}`);
+    return out({ ok: true, enabled: want === 'on', gnomeSetting: r.gnome,
+      next: want === 'on' ? 'Restart apps that were already open so they expose their controls (GTK apps usually already do).' : 'Accessibility bus disabled.' });
+  }
+  out({ ok: true, enabled: await a11yStatus(), usage: 'pinpoint a11y on|off' });
+}
+
 async function cmdDashboard(pos, flags) {
   const session = sessionName(flags);
   let info = serverInfo(session);
@@ -1238,24 +1250,47 @@ async function cmdDesktop(pos, flags) {
   };
   if (flags.remove) {
     fs.rmSync(file, { force: true });
+    for (const b of ['kwriteconfig6', 'kwriteconfig5']) {
+      if (!(process.env.PATH || '').split(':').some((d) => fs.existsSync(path.join(d, b)))) continue;
+      await new Promise((resolve) => {
+        const c = spawn(b, ['--file', 'kglobalshortcutsrc', '--group', 'services', '--group', 'pinpoint-screen.desktop', '--key', '_launch', '--delete'], { stdio: 'ignore' });
+        c.on('error', resolve); c.on('close', resolve);
+      });
+      break;
+    }
     const cur = await list();
     if (cur && cur.includes(gpath)) await gs('set', gschema, 'custom-keybindings', `[${cur.filter((x) => x !== gpath).map((x) => `'${x}'`).join(', ')}]`);
     return out({ ok: true, removed: [file, ...(cur && cur.includes(gpath) ? ['GNOME shortcut'] : [])] });
   }
   ensureDir(appsDir);
   const q = (p) => `"${p.replace(/(["\\`$])/g, '\\$1')}"`;
+  const kde = /kde|plasma/i.test(`${process.env.XDG_CURRENT_DESKTOP || ''} ${process.env.DESKTOP_SESSION || ''}`);
+  // "<Super><Shift>p" → "Meta+Shift+P" (KDE notation)
+  const kdeKey = key.replace(/<(\w+)>/g, (m, k) => `${{ super: 'Meta', control: 'Ctrl', ctrl: 'Ctrl', primary: 'Ctrl', alt: 'Alt', shift: 'Shift' }[k.toLowerCase()] || k}+`).replace(/\+(\w)$/, (m, c) => `+${c.toUpperCase()}`);
   fs.writeFileSync(file, [
     '[Desktop Entry]', 'Type=Application', 'Name=Pinpoint: annotate screen',
     'Comment=Capture the screen, then point at windows and controls and comment on them',
     `Exec=${q(launcher)} screen`, 'Icon=applets-screenshooter', 'Terminal=false', 'Categories=Utility;Graphics;Development;',
-    'Keywords=screenshot;annotate;feedback;review;pinpoint;', 'Actions=delay;dashboard;', '',
+    'Keywords=screenshot;annotate;feedback;review;pinpoint;', 'Actions=delay;dashboard;',
+    ...(kde && flags.shortcut !== false ? [`X-KDE-Shortcuts=${kdeKey}`] : []), '',
     '[Desktop Action delay]', 'Name=Capture in 5 seconds', `Exec=${q(launcher)} screen --delay 5`, '',
     '[Desktop Action dashboard]', 'Name=Open Pinpoint dashboard', `Exec=${q(launcher)} dashboard`, '',
   ].join('\n'));
   fs.chmodSync(file, 0o755);
   const res = { ok: true, desktopEntry: file, command: `${launcher} screen` };
   // GNOME (and Cinnamon/Budgie that share the schema): register a custom shortcut.
-  const cur = flags.shortcut === false ? null : await list();
+  // KDE Plasma: register the launch shortcut with kglobalaccel's service config.
+  const kwrite = kde && flags.shortcut !== false ? ['kwriteconfig6', 'kwriteconfig5'].find((b) => (process.env.PATH || '').split(':').some((d) => fs.existsSync(path.join(d, b)))) : null;
+  if (kde && flags.shortcut !== false) {
+    if (kwrite) {
+      await new Promise((resolve) => {
+        const c = spawn(kwrite, ['--file', 'kglobalshortcutsrc', '--group', 'services', '--group', 'pinpoint-screen.desktop', '--key', '_launch', kdeKey], { stdio: 'ignore' });
+        c.on('error', resolve); c.on('close', resolve);
+      });
+    }
+    res.shortcut = { desktop: 'kde', binding: kdeKey, note: kwrite ? 'Active after your next login; or open System Settings → Keyboard → Shortcuts, find "Pinpoint: annotate screen" and it is already assigned.' : 'Assign it in System Settings → Keyboard → Shortcuts → Add New → Application → "Pinpoint: annotate screen".' };
+  }
+  const cur = flags.shortcut === false || kde ? null : await list();
   if (cur) {
     const kb = `${gschema}.custom-keybinding:${gpath}`;
     await gs('set', kb, 'name', 'Pinpoint: annotate screen');
@@ -1263,7 +1298,7 @@ async function cmdDesktop(pos, flags) {
     await gs('set', kb, 'binding', key);
     if (!cur.includes(gpath)) await gs('set', gschema, 'custom-keybindings', `[${[...cur, gpath].map((x) => `'${x}'`).join(', ')}]`);
     res.shortcut = { desktop: 'gnome', binding: key };
-  } else {
+  } else if (!res.shortcut) {
     res.shortcut = { desktop: 'manual', binding: key, howTo: {
       kde: 'System Settings → Keyboard → Shortcuts → Add New → Command or Script, then paste the command',
       hyprland: `bind = SUPER SHIFT, P, exec, ${launcher} screen`,
@@ -1274,7 +1309,8 @@ async function cmdDesktop(pos, flags) {
   if (!isTTY()) return out(res);
   process.stdout.write([
     '', '  Pinpoint added to your app menu: "Pinpoint: annotate screen"', `  (${file})`,
-    res.shortcut.desktop === 'gnome' ? `  Shortcut: ${key}  (GNOME custom shortcut; change it in Settings → Keyboard)` : '  Shortcut: add one yourself, e.g.',
+    res.shortcut.desktop === 'gnome' ? `  Shortcut: ${key}  (GNOME custom shortcut; change it in Settings → Keyboard)`
+      : res.shortcut.desktop === 'kde' ? `  Shortcut: ${res.shortcut.binding}  (${res.shortcut.note})` : '  Shortcut: add one yourself, e.g.',
     ...(res.shortcut.howTo ? Object.entries(res.shortcut.howTo).map(([k, v]) => `    ${k.padEnd(9)} ${v}`) : []),
     '', '  Remove with: pinpoint desktop --remove', '',
   ].join('\n') + '\n');
@@ -1313,6 +1349,7 @@ Respond
 Manage
   status · sessions · stop [--all] · dashboard · link [bin-dir] · help · version
   doctor                     Check screen-mode dependencies; prints the install command.
+  a11y on|off                Linux: turn on the accessibility bus so Qt/KDE apps expose controls.
   desktop [--shortcut "<Super><Shift>p"] [--remove]
                              Linux: app-menu entry + global shortcut for \`pinpoint screen\`.
 
@@ -1359,6 +1396,7 @@ async function main() {
     case 'doctor': return cmdDoctor(pos, flags);
     case 'dashboard': return cmdDashboard(pos, flags);
     case 'desktop': return cmdDesktop(pos, flags);
+    case 'a11y': return cmdA11y(pos);
     case 'version': case '--version': case '-v': return out({ ok: true, version: VERSION, node: process.version, home: HOME });
     case 'help': case '--help': case '-h': process.stdout.write(HELP); return;
     default: fail('unknown_command', `Unknown command "${cmd}". Run \`pinpoint help\`.`);
