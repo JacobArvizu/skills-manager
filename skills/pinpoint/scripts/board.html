@@ -147,7 +147,8 @@
           kind: n.kind, platform: snap.platform, app: n.app, pid: n.pid, role: n.role, name: n.name, description: n.description,
           value: n.value, identifier: n.identifier, className: n.className,
           window: path[0] && path[0].kind === 'window' ? (path[0].name || path[0].app) : undefined,
-          path: path.map(labelOf).join(' › '),
+          // Skip unnamed layout containers so the path reads like the UI, not the widget tree.
+          path: path.filter((c, i) => i === 0 || i === path.length - 1 || c.name || !/^(AX)?(filler|panel|group|unknown|section|layered pane|scroll pane|viewport|redundant object|pane|custom)$/i.test(String(c.role || ''))).map(labelOf).join(' › '),
         },
       };
     },

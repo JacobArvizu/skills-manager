@@ -51,17 +51,23 @@ def showing(acc):
         return False
 
 
-def value_of(acc):
+VALUE_ROLES = {"text", "entry", "password text", "spin button", "combo box", "slider", "scroll bar",
+               "progress bar", "terminal", "document text", "editbar", "paragraph"}
+
+
+def value_of(acc, role):
+    """Current contents of inputs (text fields, sliders, …); None for everything else."""
+    if role not in VALUE_ROLES:
+        return None
     try:
-        t = acc.get_text_iface() if hasattr(acc, "get_text_iface") else None
-        if t is not None:
-            return text(Atspi.Text.get_text(t, 0, min(500, Atspi.Text.get_character_count(t))))
+        if acc.get_text_iface() is not None:
+            n = Atspi.Text.get_character_count(acc)
+            return text(Atspi.Text.get_text(acc, 0, min(n, 500)))
     except Exception:  # noqa: BLE001
         pass
     try:
-        v = acc.get_value_iface() if hasattr(acc, "get_value_iface") else None
-        if v is not None:
-            return text(Atspi.Value.get_current_value(v))
+        if acc.get_value_iface() is not None:
+            return text(Atspi.Value.get_current_value(acc))
     except Exception:  # noqa: BLE001
         pass
     return None
@@ -82,7 +88,7 @@ def add(acc, parent, app, pid):
     tree.append({
         "parent": parent, "app": app, "pid": pid, "role": role,
         "name": text(acc.get_name()), "description": text(acc.get_description()),
-        "value": value_of(acc), "identifier": text(ident),
+        "value": value_of(acc, role), "identifier": text(ident),
         "x": ext[0], "y": ext[1], "width": ext[2], "height": ext[3],
     })
     return len(tree) - 1

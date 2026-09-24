@@ -111,7 +111,14 @@ Screen annotations arrive through the same `wait`, but their targets describe na
 - Always look at `screenshot` (a crop with the target outlined) for screen annotations. Native trees are coarser than the DOM, and the image carries the intent.
 - If a capture reports warnings (no accessibility permission, AT-SPI missing, Wayland), picking still works on whole windows and dragged regions. Relay the fix in one line if the user wants element-level picking.
 
-Permissions: on **macOS**, the terminal needs *Screen Recording* (for pixels and window titles) and *Accessibility* (for UI elements) under System Settings → Privacy & Security. **Windows** needs nothing extra. **Linux** needs a screenshot tool (`grim` on wlroots Wayland, `gnome-screenshot`/`spectacle` elsewhere, or ImageMagick `import` on X11), `wmctrl` + `xprop` for window boxes on X11, and `python3-gi` + `gir1.2-atspi-2.0` for UI elements.
+Before the first screen capture on a machine, run `"$P" doctor`. It checks everything screen mode needs and prints the one install command for the user's distro (apt/dnf/pacman/zypper). Relay that command rather than guessing package names.
+
+Platform notes:
+- **Linux, X11:** full support. Windows come from `wmctrl`/`xprop`/`xwininfo`, UI elements from AT-SPI (`python3-gi` + AT-SPI typelib; Pinpoint finds a system Python that has them even when pyenv/conda shadows `python3`).
+- **Linux, Wayland:** screenshots via `grim` (Sway/Hyprland), `gnome-screenshot`, `spectacle`, or the xdg-desktop-portal (may ask permission once). Window and element picking needs window positions. **Sway** and **Hyprland** provide them. **GNOME** needs the "Window Calls" extension (or a "GNOME on Xorg" login). **KDE** and other Wayland desktops only get regions and drawing. HiDPI scaling is handled.
+- **Linux, UI elements missing** from some apps: GNOME needs `gsettings set org.gnome.desktop.interface toolkit-accessibility true` (then restart the apps). Qt/KDE apps need `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`. Chrome/Electron/VS Code need `--force-renderer-accessibility`.
+- **macOS:** the terminal needs *Screen Recording* (pixels and window titles) and *Accessibility* (UI elements) in System Settings → Privacy & Security.
+- **Windows:** nothing extra (PowerShell + UI Automation).
 
 ## Other commands
 
@@ -120,7 +127,9 @@ Permissions: on **macOS**, the terminal needs *Screen Recording* (for pixels and
 | `list [--status open\|draft\|sent\|resolved\|all] [--format json\|md]` | Annotations without waiting (works when the server is stopped). |
 | `export [--format md\|json]` | Whole session, Markdown by default. Good for pasting into issues or PRs. |
 | `show <id>` | One annotation with full detail (all attributes and styles). |
-| `status` · `sessions` · `stop [--all]` | Inspect and stop servers. |
+| `status` · `sessions` · `stop [--all]` · `dashboard` | Inspect/stop servers; open the dashboard. |
+| `doctor` | Check screen-mode dependencies and print the install command. |
+| `desktop [--shortcut "<Super><Shift>p"] [--remove]` | Linux: add "Pinpoint: annotate screen" to the app menu and a global shortcut (auto on GNOME/Cinnamon; prints the line for KDE, Sway, Hyprland, XFCE). |
 | `clear [--resolved]` | Remove annotations. |
 | `open <other-target>` | Re-point a running session at a new URL or file. |
 | `screen [--delay N] [--image f] [--snapshot tree.json] [--no-elements] [--budget secs]` | Capture the display or annotate an image (see Screen mode). |
@@ -147,6 +156,7 @@ Humans can run it directly. It's a standalone review tool:
 skills/pinpoint/scripts/pinpoint link      # optional: puts `pinpoint` on PATH (~/.local/bin)
 pinpoint open 5173                          # or a URL, file or folder
 pinpoint screen --delay 5                   # or the whole screen, any app
+pinpoint desktop                            # Linux: app-menu entry + Super+Shift+P shortcut
 ```
 
 Annotate in the browser, then use **⋯ → Copy all as Markdown** (or the dashboard at `/__pinpoint/`) to paste the feedback into an issue, a chat or any AI tool. `pinpoint serve <target>` keeps it in the foreground; Ctrl+C stops it.
@@ -158,6 +168,7 @@ Annotate in the browser, then use **⋯ → Copy all as Markdown** (or the dashb
 - **Login or OAuth redirects leave the proxy:** cross-origin redirects can't be proxied. Log in on the proxied origin, or add the snippet to the app in dev and use `start`.
 - **Selector no longer matches after edits:** expected once the DOM changes. Pins re-find elements by selector and XPath, and unmatched items still appear in the list.
 - **Screen capture is black or shows only the wallpaper (macOS):** grant Screen Recording to the terminal app, then restart it.
-- **Only windows, no UI elements:** see the permission and package notes under Screen mode; `--budget 20` allows deeper walks of huge apps.
+- **Only windows, no UI elements:** run `pinpoint doctor` and follow its output; `--budget 20` allows deeper walks of huge apps.
+- **Wayland: no windows or elements, only regions:** expected on KDE and on GNOME without the "Window Calls" extension (see platform notes).
 - **`node_not_found`:** install Node 18+ or set `PINPOINT_NODE=/path/to/node`.
 - **`Permission denied` running the launcher** (some installers drop the executable bit): use `sh <dir>/scripts/pinpoint …` or `node <dir>/scripts/pinpoint.mjs …`. They're equivalent.

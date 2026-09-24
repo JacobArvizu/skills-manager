@@ -20,9 +20,9 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { capture as captureScreen } from './screen/capture.mjs';
+import { capture as captureScreen, diagnose } from './screen/capture.mjs';
 
-const VERSION = '1.1.0';
+const VERSION = '1.2.0';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.PINPOINT_HOME || path.join(os.homedir(), '.pinpoint');
 const BASE = '/__pinpoint';
@@ -60,7 +60,7 @@ function parseArgs(argv) {
   }
   return { pos, flags };
 }
-const VALUE_FLAGS = new Set(['session', 'port', 'format', 'timeout', 'status', 'page', 'note', 'message', 'host', 'dir', 'target', 'delay', 'image', 'snapshot', 'budget']);
+const VALUE_FLAGS = new Set(['shortcut', 'session', 'port', 'format', 'timeout', 'status', 'page', 'note', 'message', 'host', 'dir', 'target', 'delay', 'image', 'snapshot', 'budget']);
 
 function out(obj) { process.stdout.write(JSON.stringify(obj, null, 2) + '\n'); }
 function fail(code, message, extra = {}) {
@@ -1191,6 +1191,95 @@ function cmdLink(pos) {
   out({ ok: true, linked: dest, onPath, hint: onPath ? 'Run `pinpoint help` from anywhere.' : `Add ${binDir} to your PATH.` });
 }
 
+async function cmdDoctor(pos, flags) {
+  const d = await diagnose();
+  const node = { name: 'Node.js', ok: true, detail: process.version };
+  d.checks.unshift(node);
+  const ok = d.checks.every((c) => c.ok);
+  if (!isTTY() || flags.format === 'json') return out({ ok, ...d });
+  const lines = ['', `  Pinpoint doctor — ${d.platform}`, ''];
+  for (const c of d.checks) lines.push(`  ${c.ok ? '✓' : '✗'} ${c.name.padEnd(28)} ${c.detail || ''}`);
+  if (d.install) lines.push('', '  Install what\'s missing:', `    ${d.install}`);
+  if (d.notes?.length) lines.push('', ...d.notes.map((n) => `  • ${n}`));
+  lines.push('', ok ? '  Everything needed for `pinpoint screen` is in place.' : '  Web mode (`pinpoint open`) works regardless; the ✗ items only affect screen mode.', '');
+  process.stdout.write(lines.join('\n') + '\n');
+}
+
+async function cmdDashboard(pos, flags) {
+  const session = sessionName(flags);
+  let info = serverInfo(session);
+  if (info && !(await health(info))) info = null;
+  if (!info) info = await startDaemon(session, flags.host || '127.0.0.1', { kind: 'none' }, flags);
+  const url = `http://${info.host}:${info.port}${BASE}/`;
+  const opened = flags.open !== false && openBrowser(url);
+  out({ ok: true, session, url, browserOpened: opened });
+}
+
+/** App-menu entry + global shortcut so anyone can capture without a terminal or an AI. */
+async function cmdDesktop(pos, flags) {
+  if (process.platform !== 'linux') fail('unsupported', 'Desktop integration is Linux-only. On macOS use a Shortcuts/Automator "Run Shell Script" action; on Windows a shortcut with a hotkey, both running: pinpoint screen');
+  const launcher = path.join(HERE, 'pinpoint');
+  const appsDir = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'applications');
+  const file = path.join(appsDir, 'pinpoint-screen.desktop');
+  const key = typeof flags.shortcut === 'string' ? flags.shortcut : '<Super><Shift>p';
+  const gpath = '/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/pinpoint/';
+  const gschema = 'org.gnome.settings-daemon.plugins.media-keys';
+  const gs = (...a) => new Promise((resolve) => {
+    const c = spawn('gsettings', a, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let o = '';
+    c.stdout.on('data', (d) => { o += d; });
+    c.on('error', () => resolve({ ok: false, out: '' }));
+    c.on('close', (code) => resolve({ ok: code === 0, out: o.trim() }));
+  });
+  const list = async () => {
+    const r = await gs('get', gschema, 'custom-keybindings');
+    if (!r.ok) return null;
+    return (r.out.match(/'[^']+'/g) || []).map((x) => x.slice(1, -1));
+  };
+  if (flags.remove) {
+    fs.rmSync(file, { force: true });
+    const cur = await list();
+    if (cur && cur.includes(gpath)) await gs('set', gschema, 'custom-keybindings', `[${cur.filter((x) => x !== gpath).map((x) => `'${x}'`).join(', ')}]`);
+    return out({ ok: true, removed: [file, ...(cur && cur.includes(gpath) ? ['GNOME shortcut'] : [])] });
+  }
+  ensureDir(appsDir);
+  const q = (p) => `"${p.replace(/(["\\`$])/g, '\\$1')}"`;
+  fs.writeFileSync(file, [
+    '[Desktop Entry]', 'Type=Application', 'Name=Pinpoint: annotate screen',
+    'Comment=Capture the screen, then point at windows and controls and comment on them',
+    `Exec=${q(launcher)} screen`, 'Icon=applets-screenshooter', 'Terminal=false', 'Categories=Utility;Graphics;Development;',
+    'Keywords=screenshot;annotate;feedback;review;pinpoint;', 'Actions=delay;dashboard;', '',
+    '[Desktop Action delay]', 'Name=Capture in 5 seconds', `Exec=${q(launcher)} screen --delay 5`, '',
+    '[Desktop Action dashboard]', 'Name=Open Pinpoint dashboard', `Exec=${q(launcher)} dashboard`, '',
+  ].join('\n'));
+  fs.chmodSync(file, 0o755);
+  const res = { ok: true, desktopEntry: file, command: `${launcher} screen` };
+  // GNOME (and Cinnamon/Budgie that share the schema): register a custom shortcut.
+  const cur = flags.shortcut === false ? null : await list();
+  if (cur) {
+    const kb = `${gschema}.custom-keybinding:${gpath}`;
+    await gs('set', kb, 'name', 'Pinpoint: annotate screen');
+    await gs('set', kb, 'command', `${q(launcher)} screen`);
+    await gs('set', kb, 'binding', key);
+    if (!cur.includes(gpath)) await gs('set', gschema, 'custom-keybindings', `[${[...cur, gpath].map((x) => `'${x}'`).join(', ')}]`);
+    res.shortcut = { desktop: 'gnome', binding: key };
+  } else {
+    res.shortcut = { desktop: 'manual', binding: key, howTo: {
+      kde: 'System Settings → Keyboard → Shortcuts → Add New → Command or Script, then paste the command',
+      hyprland: `bind = SUPER SHIFT, P, exec, ${launcher} screen`,
+      sway: `bindsym $mod+Shift+p exec ${launcher} screen`,
+      xfce: `xfconf-query -c xfce4-keyboard-shortcuts -p "/commands/custom/<Super><Shift>p" -n -t string -s "${launcher} screen"`,
+    } };
+  }
+  if (!isTTY()) return out(res);
+  process.stdout.write([
+    '', '  Pinpoint added to your app menu: "Pinpoint: annotate screen"', `  (${file})`,
+    res.shortcut.desktop === 'gnome' ? `  Shortcut: ${key}  (GNOME custom shortcut; change it in Settings → Keyboard)` : '  Shortcut: add one yourself, e.g.',
+    ...(res.shortcut.howTo ? Object.entries(res.shortcut.howTo).map(([k, v]) => `    ${k.padEnd(9)} ${v}`) : []),
+    '', '  Remove with: pinpoint desktop --remove', '',
+  ].join('\n') + '\n');
+}
+
 const HELP = `Pinpoint ${VERSION} — pick, highlight, sketch and comment on any web page.
 
 Usage: pinpoint <command> [options]
@@ -1222,7 +1311,10 @@ Respond
   clear [--resolved|--sent]  Delete annotations (default: all).
 
 Manage
-  status · sessions · stop [--all] · link [bin-dir] · help · version
+  status · sessions · stop [--all] · dashboard · link [bin-dir] · help · version
+  doctor                     Check screen-mode dependencies; prints the install command.
+  desktop [--shortcut "<Super><Shift>p"] [--remove]
+                             Linux: app-menu entry + global shortcut for \`pinpoint screen\`.
 
 Options
   --session, -s NAME   Separate workspaces (default "default", or $PINPOINT_SESSION)
@@ -1264,6 +1356,9 @@ async function main() {
     case 'sessions': return cmdSessions();
     case 'stop': return cmdStop(pos, flags);
     case 'link': return cmdLink(pos);
+    case 'doctor': return cmdDoctor(pos, flags);
+    case 'dashboard': return cmdDashboard(pos, flags);
+    case 'desktop': return cmdDesktop(pos, flags);
     case 'version': case '--version': case '-v': return out({ ok: true, version: VERSION, node: process.version, home: HOME });
     case 'help': case '--help': case '-h': process.stdout.write(HELP); return;
     default: fail('unknown_command', `Unknown command "${cmd}". Run \`pinpoint help\`.`);
