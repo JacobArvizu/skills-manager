@@ -20,8 +20,9 @@ import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { capture as captureScreen } from './screen/capture.mjs';
 
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.PINPOINT_HOME || path.join(os.homedir(), '.pinpoint');
 const BASE = '/__pinpoint';
@@ -52,14 +53,14 @@ function parseArgs(argv) {
       if (next !== undefined && !next.startsWith('--') && VALUE_FLAGS.has(key)) { flags[key] = next; i++; }
       else flags[key] = true;
     } else if (a.startsWith('-') && a.length === 2) {
-      const map = { s: 'session', p: 'port', f: 'format', t: 'timeout', h: 'help' };
+      const map = { s: 'session', p: 'port', f: 'format', t: 'timeout', h: 'help', d: 'delay' };
       const key = map[a[1]] || a[1];
       if (VALUE_FLAGS.has(key) && argv[i + 1] !== undefined) { flags[key] = argv[++i]; } else flags[key] = true;
     } else pos.push(a);
   }
   return { pos, flags };
 }
-const VALUE_FLAGS = new Set(['session', 'port', 'format', 'timeout', 'status', 'page', 'note', 'message', 'host', 'dir', 'target']);
+const VALUE_FLAGS = new Set(['session', 'port', 'format', 'timeout', 'status', 'page', 'note', 'message', 'host', 'dir', 'target', 'delay', 'image', 'snapshot', 'budget']);
 
 function out(obj) { process.stdout.write(JSON.stringify(obj, null, 2) + '\n'); }
 function fail(code, message, extra = {}) {
@@ -171,6 +172,12 @@ function sanitizeAnnotation(a) {
     updatedAt: a.updatedAt,
   };
   if (a.sentAt) clean.sentAt = a.sentAt;
+  const rect = (r) => (r && ['x', 'y', 'width', 'height'].every((k) => Number.isFinite(+r[k])) ? { x: Math.round(+r.x), y: Math.round(+r.y), width: Math.round(+r.width), height: Math.round(+r.height) } : null);
+  if (rect(a.region)) clean.region = rect(a.region);
+  if (a.capture && /^\d+$/.test(String(a.capture.id))) {
+    clean.capture = { id: String(a.capture.id), platform: truncate(a.capture.platform, 20), capturedAt: truncate(a.capture.capturedAt, 40) };
+    if (rect(a.capture.screenRegion)) clean.capture.screenRegion = rect(a.capture.screenRegion);
+  }
   return clean;
 }
 
@@ -180,10 +187,38 @@ function sanitizeAnnotation(a) {
 
 function targetLabel(t) {
   if (!t) return '(page)';
+  if (t.native) {
+    const n = t.native;
+    if (n.kind === 'desktop') return `desktop (${n.platform})`;
+    const what = n.kind === 'window' ? `window of ${n.app || 'app'}` : `${t.tag || 'element'}`;
+    const name = n.name || n.description || n.value;
+    return `${what}${name ? ` "${truncate(String(name).replace(/\s+/g, ' '), 60)}"` : ''}${n.kind !== 'window' && n.app ? ` in ${n.app}${n.window && n.window !== n.app ? ` — ${truncate(n.window, 50)}` : ''}` : ''}`;
+  }
   let s = `<${t.tag || 'element'}>`;
   if (t.text) s += ` "${truncate(t.text.replace(/\s+/g, ' ').trim(), 60)}"`;
   return s;
 }
+function captureImages(store, id) {
+  const dir = path.join(store.dir, 'captures', String(id));
+  try { return fs.readdirSync(dir).filter((f) => /^display-/.test(f)).sort().map((f) => path.join(dir, f)); } catch { return []; }
+}
+function nextCaptureId(store) {
+  const dir = ensureDir(path.join(store.dir, 'captures'));
+  const ids = fs.readdirSync(dir).map(Number).filter(Number.isFinite);
+  return String(ids.length ? Math.max(...ids) + 1 : 1);
+}
+async function doCapture(store, opts) {
+  const id = nextCaptureId(store);
+  const dir = path.join(store.dir, 'captures', id);
+  try {
+    const snap = await captureScreen(dir, opts);
+    return { id, dir, snap };
+  } catch (e) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
+}
+
 function sourceLabel(src) {
   if (!src) return '';
   const parts = [];
@@ -214,10 +249,22 @@ function toMarkdown(store, list, { title } = {}) {
       lines.push('');
       a.targets.forEach((tg, i) => {
         const prefix = a.targets.length > 1 ? `Element ${i + 1}` : 'Element';
-        lines.push(`- **${prefix}:** ${targetLabel(tg)} — \`${tg.selector}\``);
-        const src = sourceLabel(tg.source);
-        if (src) lines.push(`  - Source: ${src}`);
+        if (tg.native) {
+          lines.push(`- **${prefix}:** ${targetLabel(tg)}`);
+          if (tg.native.path) lines.push(`  - Path: ${tg.native.path}`);
+          if (tg.screen) lines.push(`  - Screen rect: ${tg.screen.x},${tg.screen.y} ${tg.screen.width}×${tg.screen.height}`);
+          if (tg.native.identifier) lines.push(`  - Identifier: \`${tg.native.identifier}\``);
+        } else {
+          lines.push(`- **${prefix}:** ${targetLabel(tg)} — \`${tg.selector}\``);
+          const src = sourceLabel(tg.source);
+          if (src) lines.push(`  - Source: ${src}`);
+        }
       });
+      if (a.region) lines.push(`- **Region:** ${a.capture?.screenRegion ? `screen ${a.capture.screenRegion.x},${a.capture.screenRegion.y} ${a.capture.screenRegion.width}×${a.capture.screenRegion.height}` : `${a.region.width}×${a.region.height} at ${a.region.x},${a.region.y} (page)`}`);
+      if (a.capture) {
+        const full = captureImages(store, a.capture.id);
+        if (full.length) lines.push(`- **Full capture:** ${full.join(', ')}`);
+      }
       if (a.quote) lines.push(`- **Quoted text:** "${a.quote.replace(/\s+/g, ' ').trim()}"`);
       if (a.strokes?.length) lines.push(`- **Sketch:** ${a.strokes.length} stroke${a.strokes.length === 1 ? '' : 's'} drawn on the page (see screenshot)`);
       const shot = store.shotPath(a);
@@ -242,7 +289,13 @@ function forAgent(store, a) {
     comment: a.comment,
     page: a.page,
     quote: a.quote || undefined,
-    targets: a.targets.map((t) => ({
+    region: a.region || undefined,
+    capture: a.capture ? { ...a.capture, images: captureImages(store, a.capture.id) } : undefined,
+    targets: a.targets.map((t) => t.native ? ({
+      kind: t.native.kind, app: t.native.app, window: t.native.window, role: t.native.role, name: t.native.name,
+      description: t.native.description, value: t.native.value, identifier: t.native.identifier, className: t.native.className,
+      pid: t.native.pid, path: t.native.path, screen: t.screen,
+    }) : ({
       selector: t.selector,
       tag: t.tag,
       text: t.text ? truncate(t.text, 200) : undefined,
@@ -513,6 +566,36 @@ function serve(opts) {
       broadcast({ type: 'upsert', annotation: u });
       return sendJSON(res, 200, { ok: true, path: path.join(store.dir, rel) });
     }
+    mm = p.match(/^\/captures\/(\d+)\/(snapshot\.json|display-[\w-]+\.(?:png|jpe?g|webp|gif))$/);
+    if (mm && m === 'GET') {
+      const file = path.join(store.dir, 'captures', mm[1], mm[2]);
+      if (!fs.existsSync(file)) return sendJSON(res, 404, { ok: false, error: 'not_found' });
+      res.writeHead(200, { 'content-type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', 'cache-control': 'no-store' });
+      return fs.createReadStream(file).pipe(res);
+    }
+    if (p === '/api/captures' && m === 'GET') {
+      const dir = path.join(store.dir, 'captures');
+      const ids = fs.existsSync(dir) ? fs.readdirSync(dir).filter((d) => /^\d+$/.test(d)).sort((a, b) => b - a) : [];
+      const host = req.headers.host || `127.0.0.1:${port}`;
+      return sendJSON(res, 200, { ok: true, captures: ids.map((id) => {
+        const snap = readJSON(path.join(dir, id, 'snapshot.json'), {});
+        return { id, url: `http://${host}${BASE}/screen/${id}`, capturedAt: snap.capturedAt, platform: snap.platform, windows: (snap.nodes || []).filter((n) => n.kind === 'window').length };
+      }) });
+    }
+    if (p === '/api/capture' && m === 'POST') {
+      const body = await readBody(req);
+      const delay = Math.max(0, Math.min(Number(body.delay) || 0, 30));
+      if (delay) await new Promise((r) => setTimeout(r, delay * 1000));
+      try {
+        const { id, snap } = await doCapture(store, { elements: body.elements !== false });
+        const host = req.headers.host || `127.0.0.1:${port}`;
+        const url = `http://${host}${BASE}/screen/${id}`;
+        broadcast({ type: 'capture', id, url });
+        return sendJSON(res, 200, { ok: true, id, url, warnings: snap.warnings });
+      } catch (e) {
+        return sendJSON(res, 500, { ok: false, error: 'capture_failed', message: e.message });
+      }
+    }
     mm = p.match(/^\/shots\/([\w-]+\.png)$/);
     if (mm && m === 'GET') {
       const file = path.join(store.shots, mm[1]);
@@ -563,6 +646,12 @@ function serve(opts) {
     if (p === '/vendor/modern-screenshot.js') {
       res.writeHead(200, { 'content-type': MIME['.js'], 'cache-control': 'max-age=3600' });
       return fs.createReadStream(path.join(HERE, 'vendor', 'modern-screenshot.umd.js')).pipe(res);
+    }
+    const sm = p.match(/^\/screen\/(\d+)$/);
+    if (sm) {
+      const host = req.headers.host || `127.0.0.1:${port}`;
+      const cfg = { token: pageToken, base: `http://${host}${BASE}`, captureId: sm[1], session };
+      return sendText(res, 200, fs.readFileSync(path.join(HERE, 'board.html'), 'utf8').replace('__PP_BOARD__', JSON.stringify(cfg).replace(/</g, '\\u003c')), MIME['.html'], { 'cache-control': 'no-store' });
     }
     if (p === '' || p === '/') {
       const host = req.headers.host || `127.0.0.1:${port}`;
@@ -852,6 +941,23 @@ async function cmdOpen(pos, flags, { injectOnly = false } = {}) {
   }
 
   if (!info) {
+    info = await startDaemon(session, host, target, flags);
+  } else if (!injectOnly && JSON.stringify(info.target) !== JSON.stringify(target) && target.kind !== 'none') {
+    await call(info, 'POST', '/api/target', { target });
+    info = serverInfo(session);
+  }
+
+  const res = openResult(session, info.host, info.port, info.target);
+  if (flags.open !== false && !injectOnly) res.browserOpened = openBrowser(res.url);
+  if (injectOnly) {
+    res.snippet = `<script src="http://${info.host}:${info.port}${BASE}/overlay.js" defer></script>`;
+    res.bookmarklet = `javascript:(()=>{if(window.__PINPOINT_LOADED__)return;const s=document.createElement('script');s.src='http://${info.host}:${info.port}${BASE}/overlay.js';document.documentElement.appendChild(s)})()`;
+  }
+  printOpen(res);
+}
+
+async function startDaemon(session, host, target, flags) {
+    let info = null;
     const dir = ensureDir(sessionDir(session));
     const log = fs.openSync(path.join(dir, 'server.log'), 'a');
     const args = [fileURLToPath(import.meta.url), '__serve', '--session', session, '--host', host,
@@ -867,18 +973,54 @@ async function cmdOpen(pos, flags, { injectOnly = false } = {}) {
       if (i && i.pid === child.pid && (await health(i))) { info = i; break; }
     }
     if (!info) fail('server_start_failed', `Server did not start. See ${path.join(dir, 'server.log')}`);
-  } else if (!injectOnly && JSON.stringify(info.target) !== JSON.stringify(target) && target.kind !== 'none') {
-    await call(info, 'POST', '/api/target', { target });
-    info = serverInfo(session);
-  }
+    return info;
+}
 
-  const res = openResult(session, info.host, info.port, info.target);
-  if (flags.open !== false && !injectOnly) res.browserOpened = openBrowser(res.url);
-  if (injectOnly) {
-    res.snippet = `<script src="http://${info.host}:${info.port}${BASE}/overlay.js" defer></script>`;
-    res.bookmarklet = `javascript:(()=>{if(window.__PINPOINT_LOADED__)return;const s=document.createElement('script');s.src='http://${info.host}:${info.port}${BASE}/overlay.js';document.documentElement.appendChild(s)})()`;
+async function cmdScreen(pos, flags) {
+  const session = sessionName(flags);
+  const host = flags.host || '127.0.0.1';
+  const image = flags.image || (pos[0] && fs.existsSync(pos[0]) ? pos[0] : null);
+  if (image && !fs.existsSync(image)) fail('target_not_found', `No such image: ${image}`);
+  if (flags.snapshot && !image) fail('missing_image', '--snapshot needs --image <file> to go with it.');
+  let info = serverInfo(session);
+  if (info && !(await health(info))) info = null;
+  if (!info) info = await startDaemon(session, host, { kind: 'none' }, flags);
+  const delay = Math.max(0, Number(flags.delay) || 0);
+  if (delay && !image) {
+    for (let i = delay; i > 0; i--) {
+      if (process.stderr.isTTY) process.stderr.write(`\rCapturing the screen in ${i}s… `);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    if (process.stderr.isTTY) process.stderr.write('\r\x1b[K');
   }
-  printOpen(res);
+  const store = new Store(session);
+  let result;
+  try {
+    result = await doCapture(store, {
+      image, snapshot: flags.snapshot, elements: flags.elements !== false,
+      budgetMs: flags.budget ? Math.round(Number(flags.budget) * 1000) : undefined,
+    });
+  } catch (e) {
+    fail('capture_failed', e.message);
+  }
+  const { id, dir, snap } = result;
+  const url = `http://${info.host}:${info.port}${BASE}/screen/${id}`;
+  const windows = snap.nodes.filter((n) => n.kind === 'window').length;
+  const res = {
+    ok: true, session, capture: id, url, mode: image ? 'image' : 'screen', platform: snap.platform,
+    displays: snap.displays.length, windows, elements: snap.nodes.length - windows,
+    images: snap.displays.map((d) => path.join(dir, d.file)), warnings: snap.warnings,
+    next: `Open the url (fullscreen works best; browser zoom to fit). The user picks windows/elements, drags regions or draws, then clicks Send. Listen with: pinpoint wait${session !== 'default' ? ` --session ${session}` : ''}`,
+  };
+  if (flags.open !== false) res.browserOpened = openBrowser(url);
+  if (!isTTY()) return out(res);
+  process.stdout.write([
+    '', `  Pinpoint ${image ? 'image' : 'screen capture'} #${id}  (session "${session}")`, '',
+    `  Annotate:  ${url}`,
+    image ? '' : `  Captured:  ${res.displays} display(s), ${windows} windows, ${res.elements} UI elements`,
+    ...snap.warnings.map((w) => `  Note:      ${w}`),
+    '', '  Alt+P pick (click a window/element, drag a region) · Alt+D draw · Alt+Enter send', '',
+  ].filter((l) => l !== null).join('\n') + '\n');
 }
 
 function openResult(session, host, port, target) {
@@ -1061,6 +1203,11 @@ Start
   start                      Server only; add the overlay to any page yourself via the
                              printed <script> snippet or the bookmarklet (dashboard).
   serve <target>             Same as open, but stays in the foreground (Ctrl+C stops).
+  screen [--delay 3]         Capture the whole display (every app, window and UI element
+                             via the OS accessibility APIs) and open it for annotation.
+         [--image shot.png]  Annotate any existing image instead (mockups, phone screenshots).
+         [--snapshot t.json] Pair --image with an element tree from another tool.
+         [--no-elements] [--budget 8]   Skip / time-limit the accessibility walk.
 
 Collect
   wait [--timeout 600] [--format json|md]
@@ -1100,6 +1247,7 @@ async function main() {
     case 'open': return cmdOpen(pos, flags);
     case 'start': return cmdOpen(pos, flags, { injectOnly: true });
     case 'serve': return cmdOpen(pos, { ...flags, foreground: true });
+    case 'screen': case 'capture': return cmdScreen(pos, flags);
     case '__serve': {
       const target = JSON.parse(flags.target);
       await serve({ session: sessionName(flags), target, host: flags.host || '127.0.0.1', port: flags.port ? Number(flags.port) : 0, screenshots: flags.screenshots });

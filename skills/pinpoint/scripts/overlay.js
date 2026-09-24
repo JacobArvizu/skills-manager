@@ -12,6 +12,9 @@
   const CFG = window.__PINPOINT__;
   if (!CFG || !CFG.base) return;
   window.__PINPOINT_LOADED__ = true;
+  // Board hooks: set by the screen-capture board (board.html) so native windows
+  // and UI elements, mirrored as hit-boxes over a screenshot, annotate like DOM.
+  const BOARD = window.__PINPOINT_BOARD__ || null;
 
   // -------------------------------------------------------------------------
   // Constants
@@ -68,7 +71,8 @@
     hoverEl: null,
     childTrail: [],
     multi: [],               // shift+click selection while picking
-    composer: null,          // { id?, targets: Element[], quote, range, strokes, kind }
+    composer: null,          // { id?, targets: Element[], quote, range, strokes, region, kind }
+    drag: null,              // pick-mode rubber band: { x, y, x2, y2, moved }
     draftStrokes: [],
     liveStroke: null,
     panelOpen: false,
@@ -144,6 +148,7 @@
   // -------------------------------------------------------------------------
 
   function pageInfo() {
+    if (BOARD) return { ...BOARD.page };
     let url = location.href;
     if (CFG.targetOrigin && location.origin === CFG.serverOrigin) url = CFG.targetOrigin + url.slice(location.origin.length);
     return { url, path: location.pathname, title: document.title };
@@ -167,6 +172,7 @@
       if (isOurs(el)) continue;
       if (SKIP_TAGS.has(el.tagName)) continue;
       if (el === document.body && list.length > 2) continue;
+      if (BOARD && !BOARD.owns(el)) continue;
       return el;
     }
     return null;
@@ -219,6 +225,7 @@
 
   function label(el) {
     if (!el) return '';
+    if (BOARD) return BOARD.label(el);
     let s = el.tagName.toLowerCase();
     if (el.id) s += '#' + el.id;
     else {
@@ -306,6 +313,7 @@
   }
 
   function describe(el) {
+    if (BOARD) return BOARD.describe(el);
     const r = el.getBoundingClientRect();
     const d = {
       selector: cssPath(el),
@@ -407,6 +415,8 @@
     .outline { position: fixed; border: 1.5px dashed; border-radius: 3px; pointer-events: none; }
     .outline.multi { border-style: solid; border-width: 2px; background: rgba(109,93,252,.1); }
     .outline.focus { border-style: solid; border-width: 2px; }
+    .outline.band { border-style: dashed; border-width: 2px; background: rgba(109,93,252,.12); }
+    .outline.region { border-style: dashed; border-width: 2px; }
     .pin { position: fixed; width: 24px; height: 24px; margin: -12px 0 0 -12px; border-radius: 12px 12px 12px 3px; color: #fff; border: 2px solid #fff;
       font: 700 11px/20px system-ui, sans-serif; text-align: center; cursor: pointer; pointer-events: auto; box-shadow: 0 2px 8px rgba(0,0,0,.28);
       transition: transform 120ms ease; padding: 0; }
@@ -541,7 +551,7 @@
 
   function render() {
     // hover box
-    if (S.mode === 'pick' && S.hoverEl && !S.composer) {
+    if (S.mode === 'pick' && S.hoverEl && !S.composer && !(S.drag && S.drag.moved)) {
       const r = S.hoverEl.getBoundingClientRect();
       Object.assign(el.hover.style, { display: 'block', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px' });
       el.hover.classList.toggle('below', r.top < 30);
@@ -550,15 +560,22 @@
 
     // outlines + pins
     const outlines = [];
+    const box = (r, cls, color, extra = '') => outlines.push(`<div class="outline ${cls}" style="left:${r.x - scrollX}px;top:${r.y - scrollY}px;width:${r.width}px;height:${r.height}px;border-color:${color};${extra}"></div>`);
     const pins = [];
     const vis = S.pinsVisible;
     for (const a of S.annotations.values()) {
       if (!onThisPage(a)) continue;
       const focused = S.composer && S.composer.id === a.id;
       if (!vis && !focused) continue;
+      const color = statusColor(a);
+      if (a.region) {
+        const rg = a.region;
+        if (!(focused && S.composer)) box(rg, 'region', color, `opacity:${a.status === 'resolved' || a.status === 'wontfix' ? 0.45 : 0.9}`);
+        pins.push(`<button class="pin${a.status === 'resolved' ? ' resolved' : ''}" data-id="${a.id}" style="left:${Math.max(14, Math.min(innerWidth - 14, rg.x - scrollX))}px;top:${Math.max(14, Math.min(innerHeight - 14, rg.y - scrollY))}px;background:${color}" title="#${a.id} ${escHtml(truncate(a.comment, 80))}" aria-label="Annotation ${a.id}">${a.id}</button>`);
+        continue;
+      }
       const els = resolveEls(a);
       if (!els.length) continue;
-      const color = statusColor(a);
       els.forEach((e, i) => {
         const r = e.getBoundingClientRect();
         if (r.bottom < -50 || r.top > innerHeight + 50) return;
@@ -572,8 +589,14 @@
         }
       });
     }
+    // rubber band (document coords)
+    if (S.drag && S.drag.moved) {
+      const d = S.drag;
+      box({ x: Math.min(d.x, d.x2), y: Math.min(d.y, d.y2), width: Math.abs(d.x2 - d.x), height: Math.abs(d.y2 - d.y) }, 'band', COLORS.draft);
+    }
+    if (S.composer && S.composer.region) box(S.composer.region, 'band', COLORS.draft);
     // current selection (multi + composer targets for new annotations)
-    const sel = S.composer && !S.composer.id ? S.composer.targets : S.multi;
+    const sel = S.composer && !S.composer.id && !S.composer.region ? S.composer.targets : S.multi;
     for (const e of sel) {
       const r = e.getBoundingClientRect();
       outlines.push(`<div class="outline multi" style="left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px;border-color:${COLORS.draft}"></div>`);
@@ -650,7 +673,7 @@
       el.toolbar.innerHTML = `<button class="tb-btn" data-act="expand" aria-label="Open Pinpoint">${icon('mark')}${c.open ? `<span class="count">${c.open}</span>` : ''}<span class="tip">Pinpoint · ${escHtml(listeningText())}</span></button>`;
     } else {
       el.toolbar.className = 'toolbar' + (S.toolbarPos ? ' placed' : '');
-      const hint = S.mode === 'pick' ? `<span class="hint"><b>Click</b> an element · Shift+click multi · ↑↓ parent/child · Esc</span><span class="sep"></span>`
+      const hint = S.mode === 'pick' ? `<span class="hint"><b>Click</b> an element · <b>drag</b> a region · Shift+click multi · ↑↓ parent/child · Esc</span><span class="sep"></span>`
         : S.mode === 'draw' ? `<span class="hint"><b>Draw</b> on the page, then describe it · Esc</span><span class="sep"></span>` : '';
       el.toolbar.innerHTML = `
         <div class="tb-handle" data-drag>${dot}<span class="name">Pinpoint</span><span class="tip">${escHtml(listeningText())}</span></div>
@@ -794,12 +817,34 @@
       if (S.mode !== 'pick' || ownEvent(e)) return;
       e.preventDefault();
       e.stopImmediatePropagation();
-      if (type === 'click' && !S.composer) onPickClick(e);
+      if (S.composer) return;
+      if (type === 'pointerdown' && e.button === 0) {
+        S.drag = { x: e.clientX + scrollX, y: e.clientY + scrollY, x2: e.clientX + scrollX, y2: e.clientY + scrollY, moved: false };
+      } else if (type === 'pointerup' && S.drag) {
+        const d = S.drag;
+        S.drag = null;
+        if (d.moved) {
+          S.suppressClick = true;
+          const region = { x: Math.round(Math.min(d.x, d.x2)), y: Math.round(Math.min(d.y, d.y2)), width: Math.round(Math.abs(d.x2 - d.x)), height: Math.round(Math.abs(d.y2 - d.y)) };
+          const anchor = anchorForRect({ x1: region.x, y1: region.y, x2: region.x + region.width, y2: region.y + region.height });
+          S.multi = [];
+          openComposer({ targets: anchor ? [anchor] : [], region });
+        }
+        schedule();
+      } else if (type === 'click') {
+        if (S.suppressClick) { S.suppressClick = false; return; }
+        onPickClick(e);
+      }
     }, { capture: true, passive: false });
   }
 
   window.addEventListener('pointermove', (e) => {
     if (S.mode !== 'pick' || S.composer || ownEvent(e)) return;
+    if (S.drag && (e.buttons & 1)) {
+      S.drag.x2 = e.clientX + scrollX; S.drag.y2 = e.clientY + scrollY;
+      if (!S.drag.moved && Math.hypot(S.drag.x2 - S.drag.x, S.drag.y2 - S.drag.y) > 8) S.drag.moved = true;
+      if (S.drag.moved) { schedule(); return; }
+    }
     const t = pickableAt(e.clientX, e.clientY);
     if (t && t !== S.hoverEl && !S.childTrail.includes(t)) { S.hoverEl = t; S.childTrail = []; schedule(); }
   }, { capture: true, passive: true });
@@ -854,8 +899,8 @@
     for (const s of strokes) for (const [x, y] of s.points) { x1 = Math.min(x1, x); y1 = Math.min(y1, y); x2 = Math.max(x2, x); y2 = Math.max(y2, y); }
     return { x1, y1, x2, y2 };
   }
-  function anchorForStrokes(strokes) {
-    const b = strokesBox(strokes);
+  function anchorForStrokes(strokes) { return anchorForRect(strokesBox(strokes)); }
+  function anchorForRect(b) {
     const cx = (b.x1 + b.x2) / 2 - scrollX, cy = (b.y1 + b.y2) / 2 - scrollY;
     el.capture.style.pointerEvents = 'none';
     let t = pickableAt(cx, cy);
@@ -867,6 +912,7 @@
       if (L - tol <= b.x1 && T - tol <= b.y1 && L + r.width + tol >= b.x2 && T + r.height + tol >= b.y2) break;
       t = t.parentElement;
     }
+    if (BOARD) { while (t && !BOARD.owns(t)) t = t.parentElement; return t || BOARD.root; }
     return t || document.body;
   }
 
@@ -912,7 +958,7 @@
   // Composer
   // -------------------------------------------------------------------------
 
-  function openComposer({ id, targets = [], quote = null, range = null, strokes = [] }) {
+  function openComposer({ id, targets = [], quote = null, range = null, strokes = [], region = null }) {
     const a = id ? S.annotations.get(id) : null;
     S.composer = {
       id: id || null,
@@ -920,6 +966,7 @@
       quote: a ? a.quote : quote,
       range: a ? null : range,
       strokes: a ? a.strokes : strokes,
+      region: a ? a.region || null : region,
       kind: a ? a.kind : 'change',
       text: a ? a.comment : '',
       reply: '',
@@ -952,9 +999,9 @@
     if (ra) c.reply = ra.value;
     const focusedField = root.activeElement && root.activeElement.dataset ? root.activeElement.dataset.f : null;
     const t0 = c.targets[0];
-    const tLabel = c.targets.length > 1 ? `${c.targets.length} elements · ${c.targets.map(label).slice(0, 3).join(', ')}` : t0 ? label(t0) : c.strokes.length ? 'sketch' : 'page';
+    const tLabel = c.region ? `Region ${c.region.width}×${c.region.height}${t0 ? ` in ${label(t0)}` : ''}` : c.targets.length > 1 ? `${c.targets.length} elements · ${c.targets.map(label).slice(0, 3).join(', ')}` : t0 ? label(t0) : c.strokes.length ? 'sketch' : 'page';
     const color = a ? statusColor(a) : COLORS.draft;
-    const canNav = !a && c.targets.length === 1 && !c.quote && !c.strokes.length;
+    const canNav = !a && c.targets.length === 1 && !c.quote && !c.strokes.length && !c.region;
     const thread = a && a.replies.length ? `<div class="thread">${a.replies.map((r) => `<div class="msg ${r.from}"><span class="who">${r.from === 'agent' ? 'Agent' : 'You'}</span>${escHtml(r.text)}</div>`).join('')}</div>` : '';
     el.composer.innerHTML = `
       <div class="c-head">
@@ -995,6 +1042,7 @@
     const w = el.composer.offsetWidth || 340, h = el.composer.offsetHeight || 220;
     let r;
     if (c.range) r = c.range.getBoundingClientRect();
+    else if (c.region) r = { left: c.region.x - scrollX, top: c.region.y - scrollY, right: c.region.x + c.region.width - scrollX, bottom: c.region.y + c.region.height - scrollY };
     else if (c.targets.length) {
       const rs = c.targets.map((t) => t.getBoundingClientRect());
       r = { left: Math.min(...rs.map((x) => x.left)), top: Math.min(...rs.map((x) => x.top)), right: Math.max(...rs.map((x) => x.right)), bottom: Math.max(...rs.map((x) => x.bottom)) };
@@ -1053,7 +1101,7 @@
     if (!c) return;
     const text = (el.composer.querySelector('textarea[data-f="text"]')?.value ?? c.text).trim();
     const reply = (el.composer.querySelector('textarea[data-f="reply"]')?.value ?? '').trim();
-    if (!text && !c.strokes.length && !c.quote && !reply) {
+    if (!text && !c.strokes.length && !c.quote && !c.region && !reply) {
       el.composer.querySelector('textarea')?.focus();
       toast('Add a comment first.');
       return;
@@ -1072,13 +1120,15 @@
       } else {
         const targets = c.targets.map(describe);
         const payload = { kind: c.kind, comment: text, targets, quote: c.quote, strokes: c.strokes.map((s) => ({ color: s.color, points: s.points })), page: pageInfo(), viewport: vp };
+        if (c.region) payload.region = c.region;
+        if (BOARD && BOARD.extras) Object.assign(payload, BOARD.extras(payload));
         const els = c.targets.slice();
         const strokes = payload.strokes;
         const { annotation } = await api('POST', '/annotations', payload);
         S.annotations.set(annotation.id, annotation);
         S.elCache.set(annotation.id, els);
         closeComposer();
-        if (CFG.screenshots !== false && els[0]) queueShot(annotation, els, strokes, c.quote);
+        if (CFG.screenshots !== false && els[0]) queueShot(annotation, els, strokes, c.quote, c.region);
       }
     } catch (err) {
       toast('Save failed: ' + err.message);
@@ -1128,20 +1178,25 @@
     }));
   }
 
-  function queueShot(annotation, els, strokes, quote) {
+  function queueShot(annotation, els, strokes, quote, region) {
     const p = (async () => {
-      const ms = await loadScreenshotLib();
-      const target = shotRootFor(els.length > 1 ? commonAncestor(els) : els[0]);
-      const r = target.getBoundingClientRect();
+      const target = BOARD ? els[0] : shotRootFor(els.length > 1 ? commonAncestor(els) : els[0]);
+      const r = BOARD ? BOARD.shotRect(els, region) : target.getBoundingClientRect();
       const area = Math.max(1, r.width * r.height);
       const scale = Math.max(0.35, Math.min(devicePixelRatio || 1, 2, Math.sqrt(6e6 / area)));
-      const canvas = await withTimeout(ms.domToCanvas(target, { scale, filter: (n) => n !== host && n !== pageStyle, backgroundColor: getBg(target) }), 15000);
+      const canvas = BOARD ? await BOARD.render(r)
+        : await withTimeout((await loadScreenshotLib()).domToCanvas(target, { scale, filter: (n) => n !== host && n !== pageStyle, backgroundColor: getBg(target) }), 15000);
       const ctx = canvas.getContext('2d');
       ctx.save();
       ctx.scale(canvas.width / r.width, canvas.height / r.height);
       ctx.lineCap = 'round'; ctx.lineJoin = 'round';
       // Box the picked element(s) when the shot includes surrounding context.
-      if (target !== els[0] || els.length > 1) {
+      if (region) {
+        ctx.strokeStyle = COLORS.draft; ctx.lineWidth = 2.5;
+        ctx.setLineDash([8, 5]);
+        ctx.strokeRect(region.x - scrollX - r.left, region.y - scrollY - r.top, region.width, region.height);
+        ctx.setLineDash([]);
+      } else if (BOARD || target !== els[0] || els.length > 1) {
         ctx.strokeStyle = COLORS.draft; ctx.lineWidth = 2.5;
         for (const e of els) {
           const er = e.getBoundingClientRect();

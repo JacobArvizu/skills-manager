@@ -5,6 +5,7 @@ For skills, plugins, scripts and tools that integrate with Pinpoint programmatic
 ## Contents
 - [Files on disk](#files-on-disk)
 - [Annotation schema](#annotation-schema)
+- [Screen captures and `--snapshot`](#screen-captures-and---snapshot)
 - [Events (`wait`)](#events-wait)
 - [HTTP API](#http-api)
 - [Browser API (`window.pinpoint`)](#browser-api-windowpinpoint)
@@ -18,6 +19,7 @@ $PINPOINT_HOME (default ~/.pinpoint)/sessions/<session>/
   server.json   {pid, port, url, adminToken, pageToken, target} — mode 600, exists while running
   server.log    helper server stdout/stderr
   shots/<id>.png
+  captures/<n>/   snapshot.json + display-*.png for each screen capture / image
 ```
 
 Reading `state.json` directly is fine. Write through the CLI or HTTP API so open browsers get live updates.
@@ -45,6 +47,8 @@ Reading `state.json` directly is fine. Write through the CLI or HTTP API so open
   "quote": "selected text" | null,
   "strokes": [{ "color": "#ff3b6b", "points": [[x, y], …] }],   // document coordinates
   "viewport": { "width", "height", "dpr", "scrollX", "scrollY" },
+  "region": { "x", "y", "width", "height" } | absent,   // dragged box, document coordinates
+  "capture": { "id", "platform", "capturedAt", "screenRegion"? } | absent,  // screen-mode annotations
   "screenshot": "shots/3.png" | null,         // relative to the session dir; CLI output makes it absolute
   "replies": [{ "from": "agent" | "user", "text": "…", "at": "ISO date" }],
   "createdAt", "updatedAt", "sentAt"
@@ -54,6 +58,34 @@ Reading `state.json` directly is fine. Write through the CLI or HTTP API so open
 Source hints are best effort. They come from `data-astro-source-file/loc`, `data-insp-path` (code-inspector), `data-inspector-*` (react-dev-inspector), `data-source-file`/`data-source`, React fibers (component names; `_debugSource` on React ≤18 dev), Vue (`__vueParentComponent.type.__file`), and Svelte dev (`__svelte_meta.loc`).
 
 The CLI's `wait` and `list` output a compact form: `xpath`, `classes`, `n`, `viewport` and `strokes` are dropped, the sketch becomes `{"strokes": N}`, `html` is capped at 800 chars, and the screenshot path is absolute. Use `list --full` or `show <id>` for everything.
+
+On screen captures, each target also carries `native` (`kind` window|element|desktop, `app`, `pid`, `role`, `name`, `description`, `value`, `identifier`, `className`, `window`, `path`) and `screen` (its rectangle in screen coordinates). `selector` is then only the board's internal id (`#n42`). The compact form flattens `native` into the target.
+
+## Screen captures and `--snapshot`
+
+`pinpoint screen` writes `captures/<n>/snapshot.json`:
+
+```jsonc
+{ "version": 1, "platform": "darwin" | "win32" | "linux" | "image", "capturedAt": "…",
+  "bounds": { "x", "y", "width", "height" },                  // virtual desktop, logical units
+  "displays": [{ "id", "x", "y", "width", "height", "file": "display-1.png", "scale": 2 }],
+  "nodes": [{ "id", "parent": null | id, "kind": "window" | "element", "app", "pid", "role",
+              "name", "description", "value", "identifier", "className", "x", "y", "width", "height" }],
+  "warnings": ["…"] }
+```
+
+Windows come first, front to back; elements follow their window, breadth-first. `scale` is image pixels per logical unit (2 on Retina).
+
+To bring your own capture (a phone, a remote host, a canvas app), pass `--image shot.png --snapshot tree.json`, where `tree.json` is the raw form:
+
+```jsonc
+{ "tree": [ { "parent": null, "app": "MyApp", "role": "Window", "name": "Home", "x": 0, "y": 0, "width": 390, "height": 844 },
+            { "parent": 0, "role": "Button", "name": "Sign out", "identifier": "signout", "x": 16, "y": 760, "width": 358, "height": 50 } ],
+  "windows": [],        // optional: { app, pid, title, x, y, width, height }, front to back, matched to tree roots by overlap
+  "displays": [] }      // optional: multi-image layouts; defaults to one display the size of --image
+```
+
+`parent` is an index into `tree`, and roots are windows. Coordinates are in the image's own space (same units as `displays`; with no displays, image pixels). Children inherit `app`/`pid` from their window.
 
 ## Events (`wait`)
 
@@ -95,11 +127,14 @@ Base: `http://127.0.0.1:<port>/__pinpoint`. Token header: `x-pinpoint-token` (or
 | `POST /api/shot/:id` | `{dataUrl: "data:image/png;base64,…"}` | `{path}` |
 | `POST /api/submit` | `{ids?, message?}` (default: all drafts) | `{seq, count, delivered}` |
 | `POST /api/end` | | queues an `end` event |
+| `POST /api/capture` | `{delay?, elements?}` | new screen capture → `{id, url, warnings}` |
+| `GET /api/captures` | | `{captures: [{id, url, capturedAt, platform, windows}]}` |
+| `GET /captures/<n>/snapshot.json`, `/captures/<n>/display-1.png` | | capture data |
 | `GET /api/stream` | SSE | `snapshot`, `upsert`, `delete`, `listening`, `target` messages |
 | `GET /api/export?format=md\|json&status=all` | | Markdown or JSON download |
 | `GET /shots/<id>.png` | | the screenshot |
 
-Unauthenticated: `GET /api/health`, `GET /overlay.js` (the browser script, with its config prepended), and `GET /` (the dashboard).
+Unauthenticated: `GET /api/health`, `GET /overlay.js` (the browser script, with its config prepended), `GET /` (the dashboard) and `GET /screen/<n>` (a capture's annotation board).
 
 ## Browser API (`window.pinpoint`)
 
@@ -124,4 +159,4 @@ Pages can also load the overlay themselves in development:
 
 - When stdout isn't a TTY (agents, pipes), every command prints JSON. Failures print `{"ok": false, "error": "<code>", "message": "…"}` and exit with status 1.
 - On a TTY, `list`, `export`, `status` and `open` print human-friendly text. Force either with `--format json|md`.
-- Error codes: `not_running`, `not_found`, `missing_id`, `missing_text`, `bad_status`, `target_not_found`, `server_start_failed`, `already_running`, `connection_lost`, `node_not_found`, `node_too_old`.
+- Error codes: `capture_failed`, `missing_image`, `not_running`, `not_found`, `missing_id`, `missing_text`, `bad_status`, `target_not_found`, `server_start_failed`, `already_running`, `connection_lost`, `node_not_found`, `node_too_old`.

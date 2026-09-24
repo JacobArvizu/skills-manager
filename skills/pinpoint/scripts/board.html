@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pinpoint · screen capture</title>
+<style>
+  html, body { margin: 0; background: #0b0b0e; }
+  body { font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; color: #e4e4e7; }
+  #stage { position: relative; margin: 0; user-select: none; -webkit-user-select: none; background: #0b0b0e; }
+  #stage img { position: absolute; display: block; pointer-events: none; -webkit-user-drag: none; }
+  /* Invisible hit-boxes mirroring native windows / UI elements. */
+  .pp-n { position: absolute; }
+  .pp-n.win { overflow: hidden; }
+  #info { position: fixed; top: 10px; left: 10px; z-index: 5; display: flex; gap: 8px; align-items: center; background: rgba(22,22,29,.92);
+    border-radius: 10px; padding: 6px 8px 6px 11px; box-shadow: 0 8px 24px -8px rgba(0,0,0,.6), 0 0 0 1px rgba(255,255,255,.06); max-width: calc(100vw - 20px); }
+  #info b { color: #fff; }
+  #info.mini { opacity: .55; }
+  #info.mini .muted, #info.mini button { display: none; }
+  #info.mini:hover { opacity: 1; }
+  #info.mini:hover .muted, #info.mini:hover button { display: inline-block; }
+  #info { transition: opacity 200ms; }
+  #info .muted { color: #a1a1aa; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #info button { border: 0; border-radius: 7px; background: rgba(255,255,255,.1); color: #fff; padding: 5px 9px; font: 600 12px/1.2 system-ui; cursor: pointer; white-space: nowrap; }
+  #info button:hover { background: #6d5dfc; }
+  #info .x { background: none; color: #a1a1aa; padding: 5px 6px; }
+  #warn { position: fixed; top: 52px; left: 10px; z-index: 5; max-width: min(560px, calc(100vw - 20px)); background: #422006; color: #fde68a; border-radius: 10px; padding: 8px 11px; font-size: 12.5px; display: none; }
+  #err { max-width: 520px; margin: 20vh auto; padding: 0 16px; font-size: 15px; }
+</style>
+</head>
+<body>
+<div id="info" hidden>
+  <b id="title">Screen</b><span class="muted" id="meta"></span>
+  <button id="recap" title="Hide this tab's window yourself, or switch to the app, before the countdown ends">Recapture in 5s</button>
+  <button class="x" id="hide" title="Hide this bar" aria-label="Hide">✕</button>
+</div>
+<div id="warn"></div>
+<div id="stage"></div>
+<script>
+(async () => {
+  const B = __PP_BOARD__;
+  const q = `token=${encodeURIComponent(B.token)}`;
+  const capBase = `${B.base}/captures/${B.captureId}`;
+  let snap;
+  try {
+    const r = await fetch(`${capBase}/snapshot.json?${q}`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    snap = await r.json();
+  } catch (e) {
+    document.body.innerHTML = `<div id="err"><h1>Capture #${B.captureId} not found</h1><p>${e.message}</p></div>`;
+    return;
+  }
+
+  // Display images first; fill in sizes the snapshot couldn't know (e.g. JPEG --image).
+  const stage = document.getElementById('stage');
+  const imgs = await Promise.all(snap.displays.map((d) => new Promise((resolve) => {
+    const img = new Image();
+    img.decoding = 'async';
+    img.draggable = false;
+    img.alt = '';
+    img.onload = () => resolve({ d, img });
+    img.onerror = () => resolve({ d, img: null });
+    img.src = `${capBase}/${encodeURIComponent(d.file)}?${q}`;
+  })));
+  for (const x of imgs) {
+    if (!x.img) continue;
+    if (!x.d.width) { x.d.width = x.img.naturalWidth; x.d.height = x.img.naturalHeight; }
+    x.d.scale = x.img.naturalWidth / x.d.width;
+  }
+  const ds = imgs.filter((x) => x.img).map((x) => x.d);
+  const bx = Math.min(...ds.map((d) => d.x)), by = Math.min(...ds.map((d) => d.y));
+  const bw = Math.max(...ds.map((d) => d.x + d.width)) - bx, bh = Math.max(...ds.map((d) => d.y + d.height)) - by;
+  stage.style.width = bw + 'px';
+  stage.style.height = bh + 'px';
+  stage.id = 'stage';
+  stage.dataset.ppLabel = snap.platform === 'image' ? 'Image' : 'Desktop';
+  for (const { d, img } of imgs) {
+    if (!img) continue;
+    Object.assign(img.style, { left: d.x - bx + 'px', top: d.y - by + 'px', width: d.width + 'px', height: d.height + 'px' });
+    stage.appendChild(img);
+  }
+
+  // Mirror windows/elements as nested hit-boxes: windows back→front so the
+  // frontmost ends on top; children positioned relative to their parent.
+  const nodes = snap.nodes || [];
+  const kids = new Map();
+  for (const n of nodes) {
+    const p = n.parent ?? -1;
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p).push(n);
+  }
+  const els = new Map();
+  const nice = (role) => String(role || '').replace(/^AX/, '').replace(/^ROLE_/, '').replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').toLowerCase() || 'element';
+  function labelOf(n) {
+    const name = n.name || n.description || n.value || n.identifier || '';
+    if (n.kind === 'window') return `${n.app || 'Window'}${name ? ` — ${name}` : ''}`;
+    return `${nice(n.role)}${name ? ` "${String(name).slice(0, 60)}"` : ''}`;
+  }
+  function build(n, parentEl, px, py) {
+    const el = document.createElement('div');
+    el.className = 'pp-n' + (n.kind === 'window' ? ' win' : '');
+    el.id = 'n' + n.id;
+    el.dataset.ppn = n.id;
+    el.style.left = n.x - px + 'px';
+    el.style.top = n.y - py + 'px';
+    el.style.width = n.width + 'px';
+    el.style.height = n.height + 'px';
+    parentEl.appendChild(el);
+    els.set(n.id, el);
+    for (const c of kids.get(n.id) || []) build(c, el, n.x, n.y);
+  }
+  const wins = (kids.get(-1) || []).slice().reverse();
+  wins.forEach((w, i) => { build(w, stage, bx, by); els.get(w.id).style.zIndex = String(i + 1); });
+
+  const byId = (el) => (el && el.dataset && el.dataset.ppn !== undefined ? nodes[+el.dataset.ppn] : null);
+  const chain = (n) => { const out = []; for (let c = n; c; c = c.parent != null ? nodes[c.parent] : null) out.unshift(c); return out; };
+  const toScreen = (r) => ({ x: Math.round(r.x + bx), y: Math.round(r.y + by), width: Math.round(r.width), height: Math.round(r.height) });
+  const stageRect = () => stage.getBoundingClientRect();
+
+  // Hooks consumed by overlay.js (see "Board hooks" there).
+  window.__PINPOINT_BOARD__ = {
+    captureId: B.captureId,
+    page: {
+      url: `screen://capture/${B.captureId}`,
+      path: location.pathname,
+      title: snap.platform === 'image' ? `Image ${snap.source ? snap.source.split(/[\\/]/).pop() : ''}` : `Screen capture #${B.captureId}`,
+    },
+    owns: (el) => el === stage || !!byId(el),
+    root: stage,
+    label(el) {
+      const n = byId(el);
+      return n ? labelOf(n) : stage.dataset.ppLabel;
+    },
+    describe(el) {
+      const sr = stageRect(), r = el.getBoundingClientRect();
+      const rect = { x: Math.round(r.left - sr.left), y: Math.round(r.top - sr.top), width: Math.round(r.width), height: Math.round(r.height) };
+      const n = byId(el);
+      if (!n) return { selector: '#stage', tag: 'desktop', text: stage.dataset.ppLabel, rect, screen: toScreen(rect), native: { kind: 'desktop', platform: snap.platform } };
+      const path = chain(n);
+      return {
+        selector: '#' + el.id,
+        tag: nice(n.role),
+        text: n.name || n.description || n.value || undefined,
+        rect,
+        screen: { x: n.x, y: n.y, width: n.width, height: n.height },
+        native: {
+          kind: n.kind, platform: snap.platform, app: n.app, pid: n.pid, role: n.role, name: n.name, description: n.description,
+          value: n.value, identifier: n.identifier, className: n.className,
+          window: path[0] && path[0].kind === 'window' ? (path[0].name || path[0].app) : undefined,
+          path: path.map(labelOf).join(' › '),
+        },
+      };
+    },
+    extras(payload) {
+      const out = { capture: { id: B.captureId, platform: snap.platform, capturedAt: snap.capturedAt } };
+      if (payload.region) out.capture.screenRegion = toScreen(payload.region);
+      return out;
+    },
+    // Crop for an annotation: the targets (or region) plus a margin of context.
+    shotRect(targets, region) {
+      const sr = stageRect();
+      let L, T, R, Bm;
+      if (region) { L = region.x - scrollX; T = region.y - scrollY; R = L + region.width; Bm = T + region.height; }
+      else {
+        const rs = targets.map((t) => t.getBoundingClientRect());
+        L = Math.min(...rs.map((r) => r.left)); T = Math.min(...rs.map((r) => r.top));
+        R = Math.max(...rs.map((r) => r.right)); Bm = Math.max(...rs.map((r) => r.bottom));
+      }
+      const pad = Math.max(48, Math.min(160, 0.3 * Math.max(R - L, Bm - T)));
+      L = Math.max(sr.left, L - pad); T = Math.max(sr.top, T - pad);
+      R = Math.min(sr.right, R + pad); Bm = Math.min(sr.bottom, Bm + pad);
+      return { left: L, top: T, right: R, bottom: Bm, width: R - L, height: Bm - T };
+    },
+    // Draw the screenshot under a client rect onto a canvas at native resolution.
+    async render(r) {
+      const sr = stageRect();
+      const x = r.left - sr.left + bx, y = r.top - sr.top + by;
+      const k = Math.max(0.35, Math.min(Math.max(...ds.map((d) => d.scale || 1)), 2.5, Math.sqrt(8e6 / Math.max(1, r.width * r.height))));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(r.width * k));
+      c.height = Math.max(1, Math.round(r.height * k));
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, c.width, c.height);
+      for (const { d, img } of imgs) {
+        if (!img) continue;
+        const ix = Math.max(x, d.x), iy = Math.max(y, d.y);
+        const ix2 = Math.min(x + r.width, d.x + d.width), iy2 = Math.min(y + r.height, d.y + d.height);
+        if (ix2 <= ix || iy2 <= iy) continue;
+        const s = d.scale || 1;
+        ctx.drawImage(img, (ix - d.x) * s, (iy - d.y) * s, (ix2 - ix) * s, (iy2 - iy) * s, (ix - x) * k, (iy - y) * k, (ix2 - ix) * k, (iy2 - iy) * k);
+      }
+      return c;
+    },
+  };
+
+  // Info bar.
+  const winCount = (kids.get(-1) || []).length;
+  document.getElementById('title').textContent = window.__PINPOINT_BOARD__.page.title;
+  document.getElementById('meta').textContent = [
+    new Date(snap.capturedAt).toLocaleTimeString(),
+    `${ds.length} display${ds.length === 1 ? '' : 's'}`,
+    snap.platform !== 'image' ? `${winCount} windows · ${nodes.length - winCount} elements` : '',
+    'Alt+P pick · drag for a region · Alt+D draw · ⌘/Ctrl − to fit',
+  ].filter(Boolean).join(' · ');
+  const info = document.getElementById('info');
+  info.hidden = false;
+  // Shrink to a small tag so it doesn't cover the capture; hover to expand.
+  setTimeout(() => info.classList.add('mini'), 6000);
+  document.getElementById('hide').onclick = () => { info.hidden = true; };
+  const recap = document.getElementById('recap');
+  if (snap.platform === 'image') recap.remove();
+  recap.onclick = async () => {
+    let n = 5;
+    recap.disabled = true;
+    const tick = setInterval(() => { n--; recap.textContent = n > 0 ? `Capturing in ${n}s…` : 'Capturing…'; }, 1000);
+    try {
+      const res = await fetch(`${B.base}/api/capture`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-pinpoint-token': B.token }, body: JSON.stringify({ delay: 5 }) });
+      const j = await res.json();
+      if (!j.ok) throw new Error(j.message || j.error);
+      location.href = j.url;
+    } catch (e) {
+      clearInterval(tick);
+      recap.textContent = 'Recapture failed';
+      recap.title = e.message;
+      recap.disabled = false;
+    }
+  };
+  if (snap.warnings && snap.warnings.length) {
+    const w = document.getElementById('warn');
+    w.textContent = snap.warnings.join(' ');
+    w.style.display = 'block';
+    w.onclick = () => { w.style.display = 'none'; };
+    w.title = 'Click to dismiss';
+    setTimeout(() => { w.style.display = 'none'; }, 9000);
+  }
+
+  // Now start the overlay; it picks up the hooks above.
+  const s = document.createElement('script');
+  s.src = `${B.base}/overlay.js`;
+  document.body.appendChild(s);
+})();
+</script>
+</body>
+</html>

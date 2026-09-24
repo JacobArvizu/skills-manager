@@ -40,6 +40,9 @@
   code, pre { font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
   pre { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 10px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
   .bm { display: inline-block; padding: 7px 12px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 650; text-decoration: none; cursor: grab; }
+  #captures { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  #captures:empty { display: none; }
+  #captures a { font-size: 13px; }
   .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink); color: var(--bg); padding: 9px 14px; border-radius: 10px; font-weight: 550; display: none; }
 </style>
 </head>
@@ -53,9 +56,11 @@
     <a class="btn primary" id="open" target="_blank" rel="noopener">Open page to annotate</a>
     <button class="btn" id="copy">Copy Markdown</button>
     <a class="btn" id="json" download>Download JSON</a>
+    <button class="btn" id="cap" title="Captures every display, window and UI element after 5 seconds — switch to the app you want to annotate">Capture screen in 5s</button>
   </div>
 </header>
 <main>
+  <div id="captures"></div>
   <div class="tabs" id="tabs"></div>
   <div id="list"></div>
   <details id="howto">
@@ -88,6 +93,24 @@
     const md = await (await fetch(`${CFG.base}/api/export?format=md&token=${CFG.token}`)).text();
     try { await navigator.clipboard.writeText(md); toast('Copied as Markdown'); } catch { toast('Clipboard blocked'); }
   };
+  async function loadCaptures() {
+    try {
+      const j = await (await fetch(`${CFG.base}/api/captures?token=${CFG.token}`)).json();
+      $('captures').innerHTML = (j.captures || []).slice(0, 12).map((c) => `<a class="btn" href="${esc(c.url)}" target="_blank" rel="noopener">🖥 Capture #${esc(c.id)}${c.platform === 'image' ? ' (image)' : ''} · ${c.capturedAt ? new Date(c.capturedAt).toLocaleTimeString() : ''}</a>`).join('');
+    } catch { /* older server */ }
+  }
+  loadCaptures();
+  $('cap').onclick = async () => {
+    const b = $('cap');
+    b.disabled = true; b.textContent = 'Capturing in 5s…';
+    try {
+      const j = await (await fetch(`${CFG.base}/api/capture`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-pinpoint-token': CFG.token }, body: JSON.stringify({ delay: 5 }) })).json();
+      if (!j.ok) throw new Error(j.message || j.error);
+      window.open(j.url, '_blank');
+      loadCaptures();
+    } catch (e) { toast('Capture failed: ' + e.message); }
+    b.disabled = false; b.textContent = 'Capture screen in 5s';
+  };
   function toast(t) { const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => el.style.display = 'none', 2200); }
 
   const FILTERS = { open: (a) => a.status === 'draft' || a.status === 'sent', done: (a) => a.status === 'resolved' || a.status === 'wontfix', all: () => true };
@@ -106,7 +129,7 @@
           ${a.comment ? `<div class="comment">${esc(a.comment)}</div>` : ''}
           ${a.quote ? `<div class="quote">“${esc(a.quote)}”</div>` : ''}
           <div class="meta">${esc(a.page ? a.page.url : '')}</div>
-          ${t ? `<div class="meta">${esc(t.selector)}</div>` : ''}
+          ${t ? `<div class="meta">${esc(t.native ? (t.native.path || t.native.kind) : t.selector)}</div>` : ''}
           ${src ? `<div class="meta">${esc(src)}</div>` : ''}
           ${a.replies.map((r) => `<div class="reply"><b>${r.from}</b>${esc(r.text)}</div>`).join('')}
         </div></article>`;
@@ -121,6 +144,7 @@
     else if (m.type === 'upsert') { const i = annotations.findIndex((a) => a.id === m.annotation.id); if (i >= 0) annotations[i] = m.annotation; else annotations.push(m.annotation); }
     else if (m.type === 'delete') annotations = annotations.filter((a) => a.id !== m.id);
     else if (m.type === 'listening') listening = m.count;
+    else if (m.type === 'capture') loadCaptures();
     render();
   };
   render();
